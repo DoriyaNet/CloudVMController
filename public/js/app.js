@@ -25,7 +25,8 @@ import {
   renderSettings,
 } from "./views.js";
 
-const PREFS_KEY = "linode-pilot:prefs";
+const PREFS_KEY = "cloudvm:prefs";
+const LEGACY_PREFS_KEY = "linode-pilot:prefs";
 const AUTO_REFRESH_INTERVAL = 30_000;
 const VIEW_META = {
   overview: { title: "概览" },
@@ -41,7 +42,11 @@ const OPERATION_LABELS = {
 
 function readPreferences() {
   try {
-    const stored = JSON.parse(localStorage.getItem(PREFS_KEY) || "{}");
+    const stored = JSON.parse(
+      localStorage.getItem(PREFS_KEY) ||
+        localStorage.getItem(LEGACY_PREFS_KEY) ||
+        "{}",
+    );
     return { autoRefresh: stored.autoRefresh !== false };
   } catch {
     return { autoRefresh: true };
@@ -58,6 +63,7 @@ function savePreferences(preferences) {
 
 function newCreateState() {
   return {
+    tokenId: "",
     label: randomInstanceLabel(),
     region: "",
     type: "",
@@ -86,13 +92,15 @@ const state = {
   overview: null,
   overviewError: null,
   catalog: null,
+  catalogTokenId: "",
   catalogError: "",
   view: "overview",
-  filters: { query: "", status: "all", region: "all" },
+  filters: { query: "", status: "all", region: "all", account: "all" },
   prefs: readPreferences(),
   detail: {
     open: false,
     id: null,
+    tokenId: null,
     loading: false,
     error: null,
     data: null,
@@ -161,7 +169,7 @@ function initials(value) {
     .split(/\s+/)
     .filter(Boolean);
   if (parts.length === 0) {
-    return "LP";
+    return "CV";
   }
   return parts
     .slice(0, 2)
@@ -171,6 +179,10 @@ function initials(value) {
 }
 
 function tokenSourceLabel() {
+  const poolSize = Number(state.settings?.poolSize || 0);
+  if (poolSize > 1) {
+    return `${poolSize} 个令牌 · 多账户模式`;
+  }
   const source =
     state.settings?.credentialSource ||
     state.session.credentialSource ||
@@ -217,7 +229,7 @@ function friendlyError(error) {
 function updateShell() {
   const activeView = VIEW_META[state.view] ? state.view : "overview";
   elements.topbarTitle.textContent = VIEW_META[activeView].title;
-  document.title = `${VIEW_META[activeView].title} · Linode Pilot`;
+  document.title = `${VIEW_META[activeView].title} · CloudVMController`;
 
   document.querySelectorAll("[data-nav]").forEach((element) => {
     const active = element.dataset.nav === activeView;
@@ -235,13 +247,25 @@ function updateShell() {
     : "—";
 
   const account = state.overview?.account;
-  const name = accountName(account);
-  const email = account?.email || tokenSourceLabel();
-  const avatar = account ? initials(name) : "LP";
+  const accountCount = state.overview?.accounts?.length || (account ? 1 : 0);
+  const multiAccount = accountCount > 1;
+  const name = multiAccount
+    ? `${accountCount} 个 Linode 账户`
+    : accountName(account);
+  const email = multiAccount
+    ? `${state.overview?.poolSize || accountCount} 个令牌同时工作`
+    : account?.email || tokenSourceLabel();
+  const avatar = multiAccount ? "MA" : account ? initials(name) : "CV";
   elements.sidebarAvatar.textContent = avatar;
   elements.topbarAvatarText.textContent = avatar;
-  elements.sidebarAccountName.textContent = account ? name : state.overview ? "Linode 账户" : "未连接";
-  elements.sidebarAccountEmail.textContent = account ? email : tokenSourceLabel();
+  elements.sidebarAccountName.textContent =
+    account || multiAccount
+      ? name
+      : state.overview
+        ? "Linode 账户"
+        : "未连接";
+  elements.sidebarAccountEmail.textContent =
+    account || multiAccount ? email : tokenSourceLabel();
   elements.tokenButton.title = `API 凭据：${tokenSourceLabel()}`;
   elements.tokenButton.classList.toggle("has-credentials", hasCredentials());
 
@@ -345,6 +369,7 @@ function renderView() {
 }
 
 function ensureCreateSelections() {
+  ensureCreateToken();
   const catalog = state.catalog;
   if (!catalog) {
     return;
@@ -430,7 +455,7 @@ function chooseDefaultImage() {
   return images[0]?.id || "";
 }
 
-async function startAvailabilityCheck(region) {
+async function startAvailabilityCheck(region, tokenId = state.create.tokenId) {
   if (!region || !hasCredentials()) {
     return;
   }
@@ -446,8 +471,12 @@ async function startAvailabilityCheck(region) {
   }
 
   try {
-    const result = await api.availability(region);
-    if (sequence !== availabilitySequence || state.create.region !== region) {
+    const result = await api.availability(region, tokenId);
+    if (
+      sequence !== availabilitySequence ||
+      state.create.region !== region ||
+      state.create.tokenId !== tokenId
+    ) {
       return;
     }
     state.availability = {
@@ -458,7 +487,11 @@ async function startAvailabilityCheck(region) {
     };
     ensureCreateSelections();
   } catch (error) {
-    if (sequence !== availabilitySequence || state.create.region !== region) {
+    if (
+      sequence !== availabilitySequence ||
+      state.create.region !== region ||
+      state.create.tokenId !== tokenId
+    ) {
       return;
     }
     state.availability = {
@@ -480,9 +513,9 @@ function activateCreateView() {
     renderView();
     return;
   }
-  if (!state.catalog) {
+  if (!state.catalog || state.catalogTokenId !== state.create.tokenId) {
     if (!state.catalogLoading && !state.catalogError) {
-      void loadCatalog();
+      void loadCatalog({ tokenId: state.create.tokenId });
     }
     renderView();
     return;
@@ -494,7 +527,7 @@ function activateCreateView() {
     state.availability.region !== region &&
     !state.availability.loading
   ) {
-    void startAvailabilityCheck(region);
+    void startAvailabilityCheck(region, state.create.tokenId);
   } else {
     renderView();
   }
@@ -508,7 +541,12 @@ async function loadOverview({ silent = false, suppressRender = false } = {}) {
   try {
     const overview = await api.overview();
     state.overview = overview;
-    state.overviewError = null;
+    state.overviewError =
+      Array.isArray(overview.errors) && overview.errors.length > 0
+        ? overview.errors
+            .map((entry) => `${entry.tokenLabel}: ${entry.message}`)
+            .join("；")
+        : null;
     state.authInvalid = false;
   } catch (error) {
     if (error.status === 401) {
@@ -526,15 +564,19 @@ async function loadOverview({ silent = false, suppressRender = false } = {}) {
   }
 }
 
-async function loadCatalog({ suppressRender = false } = {}) {
-  if (state.catalogLoading) {
+async function loadCatalog({
+  suppressRender = false,
+  tokenId = state.create.tokenId,
+} = {}) {
+  if (state.catalogLoading && state.catalogTokenId === tokenId) {
     return;
   }
   state.catalogLoading = true;
+  state.catalogTokenId = tokenId;
   state.catalogError = "";
 
   try {
-    state.catalog = await api.catalog();
+    state.catalog = await api.catalog(tokenId);
     ensureCreateSelections();
   } catch (error) {
     state.catalogError = friendlyError(error);
@@ -560,7 +602,23 @@ function applySettings(settings) {
   if (settings?.tokenConfigured) {
     state.authInvalid = false;
   }
+  ensureCreateToken();
   updateShell();
+}
+
+function ensureCreateToken() {
+  const credentials = Array.isArray(state.settings?.credentials)
+    ? state.settings.credentials
+    : [];
+  if (
+    !state.create.tokenId ||
+    !credentials.some((entry) => entry.id === state.create.tokenId)
+  ) {
+    state.create.tokenId =
+      credentials.find((entry) => entry.active)?.id ||
+      credentials[0]?.id ||
+      "";
+  }
 }
 
 async function loadSettings({ suppressRender = false } = {}) {
@@ -759,7 +817,7 @@ function renderModal() {
             <label class="simple-checkbox token-activate-row">
               <input type="checkbox" id="token-activate" checked />
               <span>${icon("check")}</span>
-              <span>保存后设为当前令牌</span>
+              <span>保存后设为默认令牌</span>
             </label>
 
             <button type="submit" class="button button-primary button-block token-submit">
@@ -1003,7 +1061,7 @@ async function handleDeleteSubmit(event) {
   submit.innerHTML = `${spinner()}<span>正在删除…</span>`;
 
   try {
-    await api.remove(instance.id);
+    await api.remove(instance.id, instance.tokenId);
     state.modal = null;
     renderModal();
     closeDrawer();
@@ -1011,7 +1069,12 @@ async function handleDeleteSubmit(event) {
       ? {
           ...state.overview,
           instances: (state.overview.instances || []).filter(
-            (entry) => String(entry.id) !== String(instance.id),
+            (entry) =>
+              !(
+                String(entry.id) === String(instance.id) &&
+                (!instance.tokenId ||
+                  String(entry.tokenId) === String(instance.tokenId))
+              ),
           ),
         }
       : null;
@@ -1032,7 +1095,8 @@ async function handleDeleteSubmit(event) {
   }
 }
 
-async function loadDetail(instanceId, { silent = false } = {}) {
+async function loadDetail(instanceId, tokenId, { silent = false } = {}) {
+  const requestedTokenId = tokenId || null;
   if (!silent) {
     state.detail.loading = true;
     state.detail.error = null;
@@ -1040,8 +1104,12 @@ async function loadDetail(instanceId, { silent = false } = {}) {
   }
 
   try {
-    const data = await api.detail(instanceId);
-    if (!state.detail.open || String(state.detail.id) !== String(instanceId)) {
+    const data = await api.detail(instanceId, requestedTokenId);
+    if (
+      !state.detail.open ||
+      String(state.detail.id) !== String(instanceId) ||
+      state.detail.tokenId !== requestedTokenId
+    ) {
       return;
     }
     state.detail.data = data;
@@ -1049,7 +1117,11 @@ async function loadDetail(instanceId, { silent = false } = {}) {
     state.detail.error = null;
     mergeInstance(data.instance);
   } catch (error) {
-    if (!state.detail.open || String(state.detail.id) !== String(instanceId)) {
+    if (
+      !state.detail.open ||
+      String(state.detail.id) !== String(instanceId) ||
+      state.detail.tokenId !== requestedTokenId
+    ) {
       return;
     }
     state.detail.loading = false;
@@ -1065,7 +1137,10 @@ function mergeInstance(instance) {
     return;
   }
   const index = state.overview.instances.findIndex(
-    (entry) => String(entry.id) === String(instance.id),
+    (entry) =>
+      String(entry.id) === String(instance.id) &&
+      (!instance.tokenId ||
+        String(entry.tokenId) === String(instance.tokenId)),
   );
   if (index >= 0) {
     state.overview.instances[index] = {
@@ -1075,10 +1150,11 @@ function mergeInstance(instance) {
   }
 }
 
-function openDetail(instanceId) {
+function openDetail(instanceId, tokenId) {
   state.detail = {
     open: true,
     id: String(instanceId),
+    tokenId: tokenId || null,
     loading: true,
     error: null,
     data: null,
@@ -1086,7 +1162,7 @@ function openDetail(instanceId) {
   };
   renderDrawer();
   syncBodyLock();
-  void loadDetail(instanceId);
+  void loadDetail(instanceId, tokenId);
   requestAnimationFrame(() => {
     document.querySelector(".drawer-close")?.focus();
   });
@@ -1097,6 +1173,7 @@ function closeDrawer() {
   state.detail = {
     open: false,
     id: null,
+    tokenId: null,
     loading: false,
     error: null,
     data: null,
@@ -1118,7 +1195,7 @@ function renderDrawer() {
   }
 }
 
-async function runInstanceAction(instanceId, operation) {
+async function runInstanceAction(instanceId, operation, tokenId) {
   const instance =
     state.overview?.instances?.find(
       (entry) => String(entry.id) === String(instanceId),
@@ -1136,16 +1213,16 @@ async function runInstanceAction(instanceId, operation) {
   refreshCurrentSurface();
 
   try {
-    await api.action(instanceId, operation);
+    await api.action(instanceId, operation, tokenId);
     showToast(`已向 ${instance.label || instanceId} 发送${operationLabel}请求`, "success");
     await loadOverview({ silent: true, suppressRender: true });
     if (state.detail.open && String(state.detail.id) === String(instanceId)) {
-      await loadDetail(instanceId, { silent: true });
+      await loadDetail(instanceId, tokenId, { silent: true });
     } else if (state.view !== "create") {
       renderView();
     }
     setTimeout(() => {
-      void refreshAfterAction(instanceId);
+      void refreshAfterAction(instanceId, tokenId);
     }, 4_000);
   } catch (error) {
     showToast(friendlyError(error), "error");
@@ -1156,13 +1233,13 @@ async function runInstanceAction(instanceId, operation) {
   }
 }
 
-async function refreshAfterAction(instanceId) {
+async function refreshAfterAction(instanceId, tokenId) {
   if (!hasCredentials()) {
     return;
   }
   await loadOverview({ silent: true, suppressRender: true });
   if (state.detail.open && String(state.detail.id) === String(instanceId)) {
-    await loadDetail(instanceId, { silent: true });
+    await loadDetail(instanceId, tokenId, { silent: true });
   } else if (state.view !== "create") {
     renderView();
   } else {
@@ -1200,6 +1277,9 @@ function parseSshKeys(value) {
 }
 
 function validateCreateForm() {
+  if (!state.create.tokenId) {
+    return "请选择用于部署的 Linode 账户。";
+  }
   if (!state.create.label.trim()) {
     return "请填写实例名称。";
   }
@@ -1304,6 +1384,7 @@ async function handleCreateSubmit(event) {
   updateCreateSummary();
 
   const payload = {
+    tokenId: state.create.tokenId,
     label: state.create.label.trim(),
     region: state.create.region,
     type: state.create.type,
@@ -1329,7 +1410,9 @@ async function handleCreateSubmit(event) {
       "success",
     );
     state.creating = false;
+    const createdTokenId = state.create.tokenId;
     state.create = newCreateState();
+    state.create.tokenId = createdTokenId;
     state.createError = "";
     state.availability = {
       loading: false,
@@ -1358,7 +1441,7 @@ async function activateSettingsToken(tokenId) {
     const result = await api.activateToken(tokenId);
     applySettings(result.settings);
     await refreshAfterSettingsChange();
-    showToast(`已切换到令牌 ${token?.label || ""}`.trim(), "success");
+    showToast(`已将 ${token?.label || "该令牌"} 设为默认令牌`, "success");
   } catch (error) {
     showToast(friendlyError(error), "error");
   }
@@ -1399,6 +1482,7 @@ function renderConnectionDiagnostic(result) {
   }
   const proxyOk = result.proxy?.ok;
   const tokenOk = result.token?.ok;
+  const tokenChecks = Array.isArray(result.tokens) ? result.tokens : [];
   const item = (label, check, iconName) => `
     <div class="diagnostic-item ${check.ok ? "ok" : "fail"}">
       <span class="diagnostic-item-icon">${icon(check.ok ? "check" : "alert")}</span>
@@ -1418,6 +1502,21 @@ function renderConnectionDiagnostic(result) {
       ${item("SOCKS 代理", result.proxy || { ok: true, message: "未启用" }, "network")}
       ${item("API 令牌", result.token || { ok: false, message: "未配置" }, "key")}
     </div>
+    ${
+      tokenChecks.length > 1
+        ? `<div class="diagnostic-token-list">
+            ${tokenChecks
+              .map(
+                (token) => `<span class="diagnostic-token${token.ok ? " is-ok" : " is-fail"}">
+                  ${icon(token.ok ? "check" : "alert")}
+                  <strong>${escapeHtml(token.accountLabel || token.label)}</strong>
+                  <small>${escapeHtml(token.message)}${token.latencyMs !== undefined ? ` · ${token.latencyMs} ms` : ""}</small>
+                </span>`,
+              )
+              .join("")}
+          </div>`
+        : ""
+    }
   `;
   return { proxyOk, tokenOk };
 }
@@ -1516,6 +1615,14 @@ function handleClick(event) {
     case "refresh-overview":
       void refreshAll({ includeCatalog: state.view === "create" });
       break;
+    case "global-search":
+      if (state.view !== "instances") {
+        window.location.hash = "#instances";
+        setTimeout(() => document.querySelector("#instance-search")?.focus(), 80);
+      } else {
+        document.querySelector("#instance-search")?.focus();
+      }
+      break;
     case "open-token":
       openTokenModal();
       break;
@@ -1589,26 +1696,38 @@ function handleClick(event) {
       renderView();
       break;
     case "clear-filters":
-      state.filters = { query: "", status: "all", region: "all" };
+      state.filters = {
+        query: "",
+        status: "all",
+        region: "all",
+        account: "all",
+      };
       renderView();
       break;
     case "open-detail":
-      openDetail(target.dataset.id);
+      openDetail(target.dataset.id, target.dataset.tokenId);
       break;
     case "close-drawer":
       closeDrawer();
       break;
     case "retry-detail":
-      void loadDetail(target.dataset.id);
+      void loadDetail(target.dataset.id, target.dataset.tokenId);
       break;
     case "instance-action":
-      void runInstanceAction(target.dataset.id, target.dataset.operation);
+      void runInstanceAction(
+        target.dataset.id,
+        target.dataset.operation,
+        target.dataset.tokenId,
+      );
       break;
     case "open-delete": {
       const instance =
         state.detail.data?.instance ||
         state.overview?.instances?.find(
-          (entry) => String(entry.id) === String(target.dataset.id),
+          (entry) =>
+            String(entry.id) === String(target.dataset.id) &&
+            (!target.dataset.tokenId ||
+              String(entry.tokenId) === String(target.dataset.tokenId)),
         );
       openDeleteModal(instance);
       break;
@@ -1661,9 +1780,34 @@ function handleInput(event) {
 function handleChange(event) {
   const target = event.target;
 
+  if (target.id === "account-filter") {
+    state.filters.account = target.value;
+    renderView();
+    return;
+  }
   if (target.id === "region-filter") {
     state.filters.region = target.value;
     renderView();
+    return;
+  }
+  if (target.id === "create-token") {
+    state.create.tokenId = target.value;
+    state.createError = "";
+    state.catalog = null;
+    state.catalogTokenId = "";
+    state.catalogError = "";
+    state.availability = {
+      loading: false,
+      region: "",
+      plans: null,
+      error: "",
+    };
+    renderView();
+    void loadCatalog({ tokenId: target.value }).then(() => {
+      if (state.view === "create" && state.catalog) {
+        void startAvailabilityCheck(state.create.region, target.value);
+      }
+    });
     return;
   }
   if (target.id === "create-region") {

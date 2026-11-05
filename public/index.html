@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="Linode Pilot — 一个轻量、专注的 Linode / Akamai Cloud 实例控制台。"
+      content="CloudVMController — 一个锐利、专注的 Linode / Akamai Cloud 实例控制台。"
     />
-    <meta name="theme-color" content="#080d0a" />
-    <title>Linode Pilot</title>
+    <meta name="theme-color" content="#000000" />
+    <title>CloudVMController</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
@@ -170,28 +170,31 @@
 
     <div class="app-shell" id="app-shell">
       <aside class="sidebar" id="sidebar">
-        <a class="brand" href="#overview" aria-label="Linode Pilot 首页">
+        <a class="brand" href="#overview" aria-label="CloudVMController 首页">
           <span class="brand-mark" aria-hidden="true">
-            <svg viewBox="0 0 40 40">
-              <path class="brand-mark-ring" d="M20 3.5 34.3 11.75v16.5L20 36.5 5.7 28.25v-16.5Z" />
-              <path class="brand-mark-line" d="M12.5 14.5 20 10.2l7.5 4.3v8.6L20 27.4l-7.5-4.3Z" />
-              <path class="brand-mark-dot" d="M20 16.4v5.2" />
+            <svg viewBox="0 0 32 32">
+              <path d="M16 3 28.5 10.2v11.6L16 29 3.5 21.8V10.2Z" />
+              <path d="M11.5 12.4 16 9.8l4.5 2.6v5.2L16 20.2l-4.5-2.6Z" />
+              <path d="M16 15.2v2.4" />
             </svg>
           </span>
           <span class="brand-type">
-            <span class="brand-name">LINODE</span>
-            <span class="brand-sub">PILOT</span>
+            <span class="brand-name">CloudVM</span>
+            <span class="brand-sub">CONTROLLER</span>
           </span>
         </a>
 
         <div class="sidebar-cloud">
-          <span class="pulse-dot"></span>
-          <span>Akamai Cloud</span>
-          <span class="sidebar-cloud-env">API</span>
+          <span class="workspace-avatar">CV</span>
+          <span class="workspace-copy">
+            <strong>Local workspace</strong>
+            <small><span class="pulse-dot"></span> Akamai Cloud API</small>
+          </span>
+          <span class="sidebar-cloud-env">LOCAL</span>
         </div>
 
         <nav class="primary-nav" aria-label="主导航">
-          <span class="nav-label">工作区</span>
+          <span class="nav-label">控制台</span>
           <a class="nav-item" href="#overview" data-nav="overview">
             <span class="nav-icon" data-icon="grid"></span>
             <span>概览</span>
@@ -205,7 +208,7 @@
             <span class="nav-icon" data-icon="plus"></span>
             <span>部署实例</span>
           </a>
-          <span class="nav-label nav-label-secondary">系统</span>
+          <span class="nav-label nav-label-secondary">配置</span>
           <a class="nav-item" href="#settings" data-nav="settings">
             <span class="nav-icon" data-icon="settings"></span>
             <span>连接与设置</span>
@@ -214,7 +217,7 @@
 
         <div class="sidebar-footer">
           <div class="sidebar-account" id="sidebar-account">
-            <span class="avatar avatar-sm" id="sidebar-avatar">LP</span>
+            <span class="avatar avatar-sm" id="sidebar-avatar">CV</span>
             <span class="sidebar-account-copy">
               <strong id="sidebar-account-name">未连接</strong>
               <span id="sidebar-account-email">选择 API 令牌后开始</span>
@@ -222,8 +225,8 @@
           </div>
           <div class="sidebar-meta">
             <span>v1.0.0</span>
-            <span class="sidebar-meta-dot"></span>
-            <span>LOCAL CONTROL</span>
+              <span class="sidebar-meta-dot"></span>
+              <span>CONTROL PLANE</span>
           </div>
         </div>
       </aside>
@@ -242,13 +245,24 @@
               <span data-icon="menu"></span>
             </button>
             <div class="breadcrumb">
-              <span class="breadcrumb-root">控制台</span>
+              <span class="breadcrumb-root">CloudVMController</span>
               <span class="breadcrumb-separator">/</span>
               <span class="breadcrumb-current" id="topbar-title">概览</span>
             </div>
           </div>
 
           <div class="topbar-right">
+            <button
+              class="command-search"
+              id="global-search"
+              type="button"
+              data-action="global-search"
+              aria-label="搜索实例"
+            >
+              <span data-icon="search"></span>
+              <span>搜索实例</span>
+              <kbd>/</kbd>
+            </button>
             <div class="connection-pill is-idle" id="connection-status">
               <span class="connection-dot"></span>
               <span class="connection-label">未连接</span>
@@ -269,7 +283,7 @@
               aria-label="管理 API 令牌"
               title="管理 API 令牌"
             >
-              <span id="topbar-avatar-text">LP</span>
+              <span id="topbar-avatar-text">CV</span>
               <span class="avatar-status"></span>
             </button>
           </div>
@@ -292,7 +306,7 @@
 
     <noscript>
       <div class="noscript-message">
-        Linode Pilot 需要启用 JavaScript 才能运行。
+        CloudVMController 需要启用 JavaScript 才能运行。
       </div>
     </noscript>
 

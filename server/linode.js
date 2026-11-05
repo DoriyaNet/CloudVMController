@@ -195,7 +195,7 @@ export async function probeUrl(
     method: "GET",
     headers: {
       Accept: "application/json",
-      "User-Agent": "LinodePilot/1.0",
+      "User-Agent": "CloudVMController/1.0",
     },
     agent,
     timeoutMs,
@@ -243,7 +243,7 @@ export class LinodeClient {
     const requestHeaders = {
       Accept: "application/json",
       Authorization: `Bearer ${this.token}`,
-      "User-Agent": "LinodePilot/1.0",
+      "User-Agent": "CloudVMController/1.0",
       ...headers,
     };
 

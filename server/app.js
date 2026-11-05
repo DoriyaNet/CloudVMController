@@ -16,7 +16,7 @@ const DEFAULT_PUBLIC_DIR = path.resolve(__dirname, "../public");
 const MAX_BODY_BYTES = 96 * 1024;
 const MAX_PAGE_SIZE = 500;
 const ALLOWED_ACTIONS = new Set(["boot", "shutdown", "reboot"]);
-const CSRF_HEADER = "x-linode-pilot";
+const CSRF_HEADERS = ["x-cloudvmcontroller", "x-linode-pilot"];
 const CSRF_VALUE = "1";
 
 const MIME_TYPES = new Map([
@@ -91,23 +91,77 @@ function cleanString(value, { maxLength = 255 } = {}) {
   return value.trim().slice(0, maxLength);
 }
 
-function requireCredential(settingsStore) {
-  const credential = settingsStore.getCredential();
-  if (!credential.token) {
+function requireCredentials(settingsStore) {
+  const credentials = settingsStore.getCredentials();
+  if (credentials.length === 0) {
     throw new HttpError(
       401,
       "Connect a Linode API token to continue.",
       "TOKEN_REQUIRED",
     );
   }
+  return credentials;
+}
+
+function resolveCredential(settingsStore, tokenId) {
+  const credentials = requireCredentials(settingsStore);
+  const requestedId = cleanString(tokenId, { maxLength: 256 });
+  if (!requestedId) {
+    return settingsStore.getCredential();
+  }
+
+  const credential = credentials.find(
+    (entry) => entry.tokenId === requestedId,
+  );
+  if (!credential) {
+    throw new HttpError(
+      404,
+      "The selected API token does not exist.",
+      "TOKEN_NOT_FOUND",
+    );
+  }
   return credential;
 }
 
+function createCredentialClient(credential, apiBase, proxy) {
+  return new LinodeClient({
+    token: credential.token,
+    apiBase,
+    proxy,
+  });
+}
+
+function credentialEntries(settingsStore, apiBase, proxy) {
+  return requireCredentials(settingsStore)
+    .slice()
+    .sort((left, right) => Number(right.active) - Number(left.active))
+    .map((credential) => ({
+      credential,
+      client: createCredentialClient(credential, apiBase, proxy),
+    }));
+}
+
+function annotateInstance(instance, credential, account = null) {
+  if (!instance) {
+    return instance;
+  }
+  return {
+    ...instance,
+    tokenId: credential.tokenId,
+    tokenLabel: credential.label,
+    accountLabel:
+      accountLabel(account) ||
+      credential.accountLabel ||
+      credential.label ||
+      "",
+  };
+}
+
 function requireCsrfHeader(request) {
-  if (request.headers[CSRF_HEADER] !== CSRF_VALUE) {
+  if (!CSRF_HEADERS.some((header) => request.headers[header] === CSRF_VALUE)) {
     throw new HttpError(
       403,
-      "Missing the Linode Pilot request header.",
+      "Missing the CloudVMController request header.",
       "CSRF_CHECK_FAILED",
     );
   }
@@ -309,28 +363,165 @@ async function serveStatic(request, response, pathname, publicDir) {
   response.end(content);
 }
 
-async function buildOverview(client) {
-  const [instances, accountResult, transferResult, eventsResult] =
-    await Promise.all([
-      client.listAll("/linode/instances"),
-      Promise.allSettled([client.request("/account")]).then(([result]) =>
-        optionalResult(result),
-      ),
-      Promise.allSettled([client.request("/account/transfer")]).then(([result]) =>
-        optionalResult(result),
-      ),
-      Promise.allSettled([
-        client.request("/account/events", {
-          query: { page_size: 25 },
+function settledValue(result) {
+  if (result.status === "fulfilled") {
+    return { value: result.value, error: null };
+  }
+  if (
+    result.reason instanceof LinodeError &&
+    [403, 404].includes(result.reason.status)
+  ) {
+    return { value: null, error: null };
+  }
+  return { value: null, error: result.reason };
+}
+
+function sumFinite(values) {
+  const numbers = values.filter((value) => Number.isFinite(Number(value)));
+  if (numbers.length === 0) {
+    return null;
+  }
+  return numbers.reduce((total, value) => total + Number(value), 0);
+}
+
+function errorMessage(error) {
+  return error?.message || "账户数据读取失败";
+}
+
+async function buildOverview(entries) {
+  const slices = await Promise.all(
+    entries.map(async ({ credential, client }) => {
+      const [instancesResult, accountResult, transferResult, eventsResult] =
+        await Promise.allSettled([
+          client.listAll("/linode/instances"),
+          client.request("/account"),
+          client.request("/account/transfer"),
+          client.request("/account/events", {
+            query: { page_size: 25 },
+          }),
+        ]);
+
+      const instancesSettled = settledValue(instancesResult);
+      const accountSettled = settledValue(accountResult);
+      const transferSettled = settledValue(transferResult);
+      const eventsSettled = settledValue(eventsResult);
+      const account = accountSettled.value;
+      const label =
+        accountLabel(account) ||
+        credential.accountLabel ||
+        credential.label ||
+        "";
+      const instances = normalizeArrayPayload(instancesSettled.value).map(
+        (instance) =>
+          annotateInstance(instance, credential, account),
+      );
+      const events = normalizeArrayPayload(eventsSettled.value).map(
+        (event) => ({
+          ...event,
+          tokenId: credential.tokenId,
+          tokenLabel: credential.label,
+          accountLabel: label,
         }),
-      ]).then(([result]) => optionalResult(result)),
-    ]);
+      );
+
+      return {
+        tokenId: credential.tokenId,
+        tokenLabel: credential.label,
+        accountLabel: label,
+        account,
+        transfer: transferSettled.value,
+        instances,
+        events,
+        error: instancesSettled.error,
+        accountError: accountSettled.error,
+      };
+    }),
+  );
+
+  const seenInstances = new Set();
+  const instances = slices
+    .flatMap((slice) => slice.instances)
+    .filter((instance) => {
+      const key = String(instance.id);
+      if (seenInstances.has(key)) {
+        return false;
+      }
+      seenInstances.add(key);
+      return true;
+    });
+  const seenEvents = new Set();
+  const events = slices
+    .flatMap((slice) => slice.events)
+    .filter((event) => {
+      const key = String(event.id);
+      if (seenEvents.has(key)) {
+        return false;
+      }
+      seenEvents.add(key);
+      return true;
+    })
+    .sort(
+      (left, right) =>
+        (Date.parse(right.created) || 0) - (Date.parse(left.created) || 0),
+    )
+    .slice(0, 30);
+  const accountSlices = slices.filter((slice) => slice.account);
+  const transfers = slices
+    .map((slice) => slice.transfer)
+    .filter(Boolean);
+  const detectedTransfer = transfers.length
+    ? {
+        used: sumFinite(transfers.map((transfer) => transfer.used)),
+        quota: sumFinite(transfers.map((transfer) => transfer.quota)),
+        billable: sumFinite(transfers.map((transfer) => transfer.billable)),
+        pooled: true,
+        accountCount: transfers.length,
+      }
+    : null;
+  const aggregateAccount = accountSlices.length
+    ? {
+        ...accountSlices[0].account,
+        balance: sumFinite(
+          accountSlices.map((slice) => slice.account.balance),
+        ),
+        balance_uninvoiced: sumFinite(
+          accountSlices.map((slice) => slice.account.balance_uninvoiced),
+        ),
+        pooled: true,
+        accountCount: accountSlices.length,
+      }
+    : null;
+  const accounts = slices.map((slice) => ({
+    tokenId: slice.tokenId,
+    tokenLabel: slice.tokenLabel,
+    label: slice.accountLabel,
+    email: slice.account?.email || "",
+    balance: slice.account?.balance ?? null,
+    balance_uninvoiced: slice.account?.balance_uninvoiced ?? null,
+    instanceCount: slice.instances.length,
+    transfer: slice.transfer,
+    ok: !slice.error && !slice.accountError,
+    error:
+      slice.error || slice.accountError
+        ? errorMessage(slice.error || slice.accountError)
+        : "",
+    accountAvailable: Boolean(slice.account),
+  }));
 
   return {
-    account: accountResult,
-    transfer: transferResult,
+    account: aggregateAccount,
+    accounts,
+    transfer: detectedTransfer,
     instances,
-    events: Array.isArray(eventsResult?.data) ? eventsResult.data : [],
+    events,
+    poolSize: entries.length,
+    errors: slices
+      .filter((slice) => slice.error)
+      .map((slice) => ({
+        tokenId: slice.tokenId,
+        tokenLabel: slice.tokenLabel,
+        message: errorMessage(slice.error),
+      })),
     fetchedAt: new Date().toISOString(),
   };
 }
@@ -350,8 +541,11 @@ async function buildCatalog(client) {
   };
 }
 
-async function buildDetail(client, instanceId) {
-  const instance = await client.request(`/linode/instances/${instanceId}`);
+async function buildDetail(client, instanceId, credential) {
+  const rawInstance = await client.request(
+    `/linode/instances/${instanceId}`,
+  );
+  const instance = annotateInstance(rawInstance, credential);
 
   const [statsResult, backupsResult, eventsResult] = await Promise.allSettled([
     client.request(`/linode/instances/${instanceId}/stats`),
@@ -368,7 +562,82 @@ async function buildDetail(client, instanceId) {
         .slice(0, 20)
     : [];
 
-  return { instance, stats, backups, events };
+  return {
+    instance,
+    stats,
+    backups,
+    events,
+    tokenId: credential.tokenId,
+    tokenLabel: credential.label,
+    accountLabel: instance.accountLabel,
+  };
+}
+
+async function listAggregateInstances(entries) {
+  const slices = await Promise.all(
+    entries.map(async ({ credential, client }) => {
+      try {
+        const instances = await client.listAll("/linode/instances");
+        return {
+          instances: instances.map((instance) =>
+            annotateInstance(instance, credential),
+          ),
+          error: null,
+        };
+      } catch (error) {
+        return { instances: [], error };
+      }
+    }),
+  );
+
+  return {
+    data: slices.flatMap((slice) => slice.instances),
+    errors: slices
+      .filter((slice) => slice.error)
+      .map((slice) => errorMessage(slice.error)),
+  };
+}
+
+async function resolveInstanceTarget(
+  settingsStore,
+  apiBase,
+  proxy,
+  instanceId,
+  tokenId,
+) {
+  if (tokenId) {
+    const credential = resolveCredential(settingsStore, tokenId);
+    return {
+      credential,
+      client: createCredentialClient(credential, apiBase, proxy),
+    };
+  }
+
+  for (const entry of credentialEntries(settingsStore, apiBase, proxy)) {
+    try {
+      const instance = await entry.client.request(
+        `/linode/instances/${instanceId}`,
+      );
+      return {
+        ...entry,
+        instance: annotateInstance(instance, entry.credential),
+      };
+    } catch (error) {
+      if (
+        error instanceof LinodeError &&
+        [401, 403, 404].includes(error.status)
+      ) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw new HttpError(
+    404,
+    "The instance was not found in any connected account.",
+    "INSTANCE_NOT_FOUND",
+  );
 }
 
 function accountLabel(account) {
@@ -621,11 +890,12 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
       pathname === "/api/settings/test-connection" &&
       request.method === "POST"
     ) {
-      const credential = settingsStore.getCredential();
+      const credentials = settingsStore.getCredentials();
       const proxy = settingsStore.getProxyConfig();
       const checks = {
         proxy: { enabled: proxy.enabled, ok: true, message: "未启用代理" },
         token: { ok: false, message: "尚未配置 API 令牌" },
+        tokens: [],
         ok: false,
       };
 
@@ -654,29 +924,51 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
         }
       }
 
-      if (credential.token) {
-        try {
-          const verification = await verifyApiToken({
-            token: credential.token,
-            apiBase,
-            proxy,
-          });
-          checks.token = {
-            ok: true,
-            source: credential.source,
-            label: credential.label,
-            latencyMs: verification.latencyMs,
-            accountLabel: verification.accountLabel,
-            message: "API 令牌验证通过",
-          };
-        } catch (error) {
-          checks.token = {
-            ok: false,
-            source: credential.source,
-            label: credential.label,
-            message: error.message || "API 令牌验证失败",
-          };
-        }
+      checks.tokens = await Promise.all(
+        credentials.map(async (credential) => {
+          try {
+            const verification = await verifyApiToken({
+              token: credential.token,
+              apiBase,
+              proxy,
+            });
+            return {
+              tokenId: credential.tokenId,
+              ok: true,
+              source: credential.source,
+              label: credential.label,
+              latencyMs: verification.latencyMs,
+              accountLabel: verification.accountLabel,
+              message: "API 令牌验证通过",
+            };
+          } catch (error) {
+            return {
+              tokenId: credential.tokenId,
+              ok: false,
+              source: credential.source,
+              label: credential.label,
+              message: error.message || "API 令牌验证失败",
+            };
+          }
+        }),
+      );
+
+      if (checks.tokens.length > 0) {
+        const okCount = checks.tokens.filter((token) => token.ok).length;
+        checks.token = {
+          ok: okCount === checks.tokens.length,
+          source: "pool",
+          label: `${checks.tokens.length} 个令牌`,
+          okCount,
+          total: checks.tokens.length,
+          latencyMs: Math.max(
+            ...checks.tokens.map((token) => token.latencyMs || 0),
+          ),
+          message:
+            okCount === checks.tokens.length
+              ? `${okCount} 个 API 令牌全部验证通过`
+              : `${okCount}/${checks.tokens.length} 个 API 令牌可用`,
+        };
       }
 
       checks.ok = checks.token.ok && checks.proxy.ok;
@@ -685,20 +977,15 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
       return;
     }
 
-    const credential = requireCredential(settingsStore);
     const proxy = settingsStore.getProxyConfig();
-    const client = new LinodeClient({
-      token: credential.token,
-      apiBase,
-      proxy,
-    });
+    const entries = credentialEntries(settingsStore, apiBase, proxy);
 
     if (pathname === "/api/overview") {
       if (request.method !== "GET") {
         methodNotAllowed(response, ["GET"]);
         return;
       }
-      sendJson(response, 200, await buildOverview(client));
+      sendJson(response, 200, await buildOverview(entries));
       return;
     }
 
@@ -707,25 +994,34 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
         methodNotAllowed(response, ["GET"]);
         return;
       }
+      const credential = resolveCredential(
+        settingsStore,
+        url.searchParams.get("tokenId"),
+      );
+      const client = createCredentialClient(credential, apiBase, proxy);
       sendJson(response, 200, await buildCatalog(client));
       return;
     }
 
     if (pathname === "/api/instances") {
       if (request.method === "GET") {
-        sendJson(response, 200, {
-          data: await client.listAll("/linode/instances"),
-        });
+        sendJson(response, 200, await listAggregateInstances(entries));
         return;
       }
       if (request.method === "POST") {
         const body = await readJsonBody(request);
+        const credential = resolveCredential(settingsStore, body.tokenId);
+        const client = createCredentialClient(credential, apiBase, proxy);
         const payload = validateCreatePayload(body);
         const instance = await client.request("/linode/instances", {
           method: "POST",
           body: payload,
         });
-        sendJson(response, 201, { instance });
+        sendJson(response, 201, {
+          instance: annotateInstance(instance, credential),
+          tokenId: credential.tokenId,
+          tokenLabel: credential.label,
+        });
         return;
       }
       methodNotAllowed(response, ["GET", "POST"]);
@@ -739,6 +1035,11 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
         return;
       }
       const region = availabilityMatch[1];
+      const credential = resolveCredential(
+        settingsStore,
+        url.searchParams.get("tokenId"),
+      );
+      const client = createCredentialClient(credential, apiBase, proxy);
       const payload = await client.request(`/regions/${region}/availability`);
       const entries = normalizeArrayPayload(payload);
       const plans = Object.fromEntries(
@@ -757,7 +1058,18 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
         return;
       }
       const instanceId = validateInstanceId(detailMatch[1]);
-      sendJson(response, 200, await buildDetail(client, instanceId));
+      const target = await resolveInstanceTarget(
+        settingsStore,
+        apiBase,
+        proxy,
+        instanceId,
+        url.searchParams.get("tokenId"),
+      );
+      sendJson(
+        response,
+        200,
+        await buildDetail(target.client, instanceId, target.credential),
+      );
       return;
     }
 
@@ -778,7 +1090,14 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
           "UNSUPPORTED_ACTION",
         );
       }
-      const result = await client.request(
+      const target = await resolveInstanceTarget(
+        settingsStore,
+        apiBase,
+        proxy,
+        instanceId,
+        url.searchParams.get("tokenId"),
+      );
+      const result = await target.client.request(
         `/linode/instances/${instanceId}/${action}`,
         { method: "POST" },
       );
@@ -793,14 +1112,27 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
         return;
       }
       const instanceId = validateInstanceId(instanceMatch[1]);
+      const target = await resolveInstanceTarget(
+        settingsStore,
+        apiBase,
+        proxy,
+        instanceId,
+        url.searchParams.get("tokenId"),
+      );
       if (request.method === "GET") {
         sendJson(
           response,
           200,
-          await client.request(`/linode/instances/${instanceId}`),
+          target.instance ||
+            annotateInstance(
+              await target.client.request(
+                `/linode/instances/${instanceId}`,
+              ),
+              target.credential,
+            ),
         );
       } else {
-        await client.request(`/linode/instances/${instanceId}`, {
+        await target.client.request(`/linode/instances/${instanceId}`, {
           method: "DELETE",
         });
         sendJson(response, 200, { ok: true });

@@ -71,7 +71,7 @@ function buildSeriesPath(points, bounds, width, height, padding) {
 export function renderLineChart(series, options = {}) {
   const {
     height = 150,
-    colors = ["#42e294", "#63b3ed"],
+    colors = ["#4ade80", "#60a5fa"],
     fill = true,
     maxValueOverride = null,
   } = options;

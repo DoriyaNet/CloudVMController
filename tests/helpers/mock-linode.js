@@ -348,12 +348,121 @@ const EVENTS = [
   },
 ];
 
+const ALT_ACCOUNT = {
+  first_name: "Rina",
+  last_name: "Sato",
+  company: "Orbit Works",
+  email: "rina@orbit.example",
+  balance: 12.5,
+  balance_uninvoiced: 1.25,
+  active_since: "2025-01-15T00:00:00",
+  billing_source: "account",
+  country: "JP",
+};
+
+const ALT_TRANSFER = {
+  billable: 2,
+  used: 50,
+  quota: 1000,
+};
+
+function altInstanceSeed() {
+  return [
+    {
+      id: 72000001,
+      label: "tokyo-batch",
+      status: "running",
+      region: "ap-northeast",
+      type: "g6-standard-1",
+      image: "linode/debian12",
+      ipv4: ["139.162.88.41"],
+      ipv6: "2400:8902::f03c:95ff:fe55:1a01/128",
+      specs: { disk: 51200, memory: 2048, vcpus: 1, transfer: 2000 },
+      tags: ["batch", "tokyo"],
+      created: "2026-02-11T08:30:00",
+      updated: isoMinutesAgo(18),
+      hypervisor: "kvm",
+      backups: { enabled: false, available: false },
+    },
+    {
+      id: 72000002,
+      label: "osaka-archive",
+      status: "offline",
+      region: "ap-south",
+      type: "g6-nanode-1",
+      image: "linode/alpine3.20",
+      ipv4: ["172.104.71.90"],
+      ipv6: "2400:8907::f03c:95ff:fe22:7b02/128",
+      specs: { disk: 25600, memory: 1024, vcpus: 1, transfer: 1000 },
+      tags: ["archive"],
+      created: "2025-11-20T04:12:00",
+      updated: isoMinutesAgo(1440),
+      hypervisor: "kvm",
+      backups: { enabled: false, available: false },
+    },
+  ];
+}
+
+const ALT_EVENTS = [
+  {
+    id: 9900001,
+    action: "linode_create",
+    created: isoMinutesAgo(30),
+    status: "finished",
+    entity: { id: 72000001, label: "tokyo-batch", type: "linode" },
+    username: "rina",
+    duration: 42,
+  },
+  {
+    id: 9900002,
+    action: "linode_shutdown",
+    created: isoMinutesAgo(1500),
+    status: "finished",
+    entity: { id: 72000002, label: "osaka-archive", type: "linode" },
+    username: "rina",
+    duration: 19,
+  },
+];
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
 export async function createMockLinode({ port = 0 } = {}) {
-  let instances = instanceSeed();
+  const accountStates = new Map([
+    [
+      TOKEN,
+      {
+        account: {
+          first_name: "Ming",
+          last_name: "Chen",
+          company: "Northstar Labs",
+          email: "ops@northstar.example",
+          balance: 42.18,
+          balance_uninvoiced: 7.34,
+          active_since: "2024-05-01T00:00:00",
+          billing_source: "account",
+          country: "SG",
+        },
+        transfer: {
+          billable: 4,
+          used: 183.4,
+          quota: 5000,
+        },
+        instances: instanceSeed(),
+        events: clone(EVENTS),
+      },
+    ],
+    [
+      ALT_TOKEN,
+      {
+        account: clone(ALT_ACCOUNT),
+        transfer: clone(ALT_TRANSFER),
+        instances: altInstanceSeed(),
+        events: clone(ALT_EVENTS),
+      },
+    ],
+  ]);
   const requests = [];
   let nextId = 62000000;
 
@@ -368,11 +477,13 @@ export async function createMockLinode({ port = 0 } = {}) {
       body: request.method === "POST" ? await readBody(request) : null,
     });
 
-    if (
-      ![`Bearer ${TOKEN}`, `Bearer ${ALT_TOKEN}`].includes(
-        request.headers.authorization,
-      )
-    ) {
+    const authorization = String(request.headers.authorization || "");
+    const accountState = accountStates.get(
+      authorization.startsWith("Bearer ")
+        ? authorization.slice("Bearer ".length)
+        : "",
+    );
+    if (!accountState) {
       return json(response, 401, {
         errors: [{ reason: "Invalid Token" }],
       });
@@ -389,33 +500,19 @@ export async function createMockLinode({ port = 0 } = {}) {
     }
 
     if (path === "/account" && request.method === "GET") {
-      return json(response, 200, {
-        first_name: "Ming",
-        last_name: "Chen",
-        company: "Northstar Labs",
-        email: "ops@northstar.example",
-        balance: 42.18,
-        balance_uninvoiced: 7.34,
-        active_since: "2024-05-01T00:00:00",
-        billing_source: "account",
-        country: "SG",
-      });
+      return json(response, 200, clone(accountState.account));
     }
 
     if (path === "/account/transfer" && request.method === "GET") {
-      return json(response, 200, {
-        billable: new Date().getDate(),
-        used: 183.4,
-        quota: 5000,
-      });
+      return json(response, 200, clone(accountState.transfer));
     }
 
     if (path === "/account/events" && request.method === "GET") {
       return json(response, 200, {
-        data: clone(EVENTS),
+        data: clone(accountState.events),
         page: 1,
         pages: 1,
-        results: EVENTS.length,
+        results: accountState.events.length,
       });
     }
 
@@ -463,10 +560,10 @@ export async function createMockLinode({ port = 0 } = {}) {
 
     if (path === "/linode/instances" && request.method === "GET") {
       return json(response, 200, {
-        data: clone(instances),
+        data: clone(accountState.instances),
         page: 1,
         pages: 1,
-        results: instances.length,
+        results: accountState.instances.length,
       });
     }
 
@@ -494,7 +591,7 @@ export async function createMockLinode({ port = 0 } = {}) {
         hypervisor: "kvm",
         backups: { enabled: Boolean(body.backups_enabled), available: false },
       };
-      instances = [newInstance, ...instances];
+      accountState.instances = [newInstance, ...accountState.instances];
       return json(response, 200, newInstance);
     }
 
@@ -505,7 +602,7 @@ export async function createMockLinode({ port = 0 } = {}) {
 
     const backupsMatch = path.match(/^\/linode\/instances\/(\d+)\/backups$/);
     if (backupsMatch && request.method === "GET") {
-      const instance = instances.find(
+      const instance = accountState.instances.find(
         (entry) => entry.id === Number(backupsMatch[1]),
       );
       return json(
@@ -522,7 +619,7 @@ export async function createMockLinode({ port = 0 } = {}) {
       /^\/linode\/instances\/(\d+)\/(boot|shutdown|reboot)$/,
     );
     if (actionMatch && request.method === "POST") {
-      const instance = instances.find(
+      const instance = accountState.instances.find(
         (entry) => entry.id === Number(actionMatch[1]),
       );
       if (!instance) {
@@ -540,7 +637,7 @@ export async function createMockLinode({ port = 0 } = {}) {
 
     const instanceMatch = path.match(/^\/linode\/instances\/(\d+)$/);
     if (instanceMatch) {
-      const instance = instances.find(
+      const instance = accountState.instances.find(
         (entry) => entry.id === Number(instanceMatch[1]),
       );
       if (!instance) {
@@ -552,7 +649,9 @@ export async function createMockLinode({ port = 0 } = {}) {
         return json(response, 200, clone(instance));
       }
       if (request.method === "DELETE") {
-        instances = instances.filter((entry) => entry.id !== instance.id);
+        accountState.instances = accountState.instances.filter(
+          (entry) => entry.id !== instance.id,
+        );
         return json(response, 200, {});
       }
     }

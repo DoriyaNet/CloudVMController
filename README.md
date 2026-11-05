@@ -1,6 +1,6 @@
-# Linode Pilot
+# CloudVMController
 
-一个本地运行的 Linode / Akamai Cloud 实例控制面板。用 Linode API v4 管理虚拟机，界面专注于日常高频操作：查看状态、开关机、重启、部署、监控和删除实例。
+一个本地运行的 Linode / Akamai Cloud 实例控制面板。用 Linode API v4 管理虚拟机，界面专注于日常高频操作：查看状态、开关机、重启、部署、监控和删除实例。界面采用锐利的 Vercel / Cloudflare 控制台风格，强调信息密度、清晰层级和高频操作效率。
 
 需要 Node.js 20+。运行时只使用一个依赖 `socks-proxy-agent`，用于连接 SOCKS 代理。
 
@@ -12,7 +12,8 @@
 - 创建实例：区域、规格、镜像、标签、备份、私有 IPv4、SSH 公钥和 Cloud-init
 - 区域库存检查：选择区域后标记不可用规格
 - 实例详情：IP、SSH 命令、配置、24 小时 CPU / 网络监控、备份状态和近期事件
-- 多令牌管理：在 Web 页面添加、测试、切换和删除多个 Linode API Token
+- 多账户聚合：所有已保存的令牌同时读取，实例、余额、流量和活动合并展示
+- 多令牌管理：在 Web 页面添加、测试、设置默认和删除多个 Linode API Token
 - 本地 SOCKS 代理：支持 SOCKS4 / 4A / 5 / 5H，可直接填写 Clash、v2ray 等本地代理
 - 凭据加密：令牌与代理密码使用 AES-256-GCM 加密保存在本机 `data/`
 - 自动刷新：页面可见时每 30 秒同步一次状态
@@ -37,7 +38,7 @@ npm start
 3. 点击「添加令牌」，粘贴 Personal Access Token 并保存。
 4. 需要时在同一个页面填写本地 SOCKS 代理并「测试代理」。
 
-令牌、当前令牌和代理设置都在 Web 页面管理，不需要手动编辑 `.env`。设置会立即生效，写入本机 `data/settings.json`；敏感字段加密保存，密钥在 `data/.key`。
+令牌、默认令牌和代理设置都在 Web 页面管理，不需要手动编辑 `.env`。所有已添加的令牌会同时工作，实例和账户数据会合并展示；设置会立即生效，写入本机 `data/settings.json`，敏感字段加密保存，密钥在 `data/.key`。
 
 如果你之前把令牌放在 `.env` 的 `LINODE_API_TOKEN` 中，页面会把它作为回退凭据，并显示「从 .env 导入」按钮。导入后即可删除该环境变量，以后完全通过页面管理。
 
@@ -61,8 +62,10 @@ npm start
 | `LINODE_API_TOKEN` | 空 | 可选的回退令牌；Web 中启用的令牌优先 |
 | `HOST` | `127.0.0.1` | 监听地址 |
 | `PORT` | `4173` | 本地端口 |
-| `LINODE_PILOT_DATA_DIR` | `./data` | 加密设置与密钥的保存目录 |
+| `CLOUDVM_DATA_DIR` | `./data` | 加密设置与密钥的保存目录 |
 | `LINODE_API_BASE` | `https://api.linode.com/v4` | API 地址，仅用于兼容代理或测试 |
+
+旧版本的 `LINODE_PILOT_DATA_DIR` 仍可作为 `CLOUDVM_DATA_DIR` 的兼容回退。
 
 示例：
 
@@ -72,7 +75,7 @@ PORT=4173
 LINODE_API_TOKEN=
 ```
 
-`.env` 只用于可选的回退令牌和服务启动参数。API 令牌、当前令牌和 SOCKS 代理都建议在「连接与设置」页面管理，保存后立即生效。修改 `.env` 后需要重启 Node 服务。
+`.env` 只用于可选的回退令牌和服务启动参数。API 令牌、默认令牌和 SOCKS 代理都建议在「连接与设置」页面管理，保存后立即生效。修改 `.env` 后需要重启 Node 服务。
 
 ## 安全说明
 
@@ -97,8 +100,11 @@ LINODE_API_TOKEN=
 打开「连接与设置」：
 
 - 「添加令牌」会先验证令牌，再加密保存到本机。填写名称便于区分生产、测试或不同账户。
-- 「启用」切换当前令牌；之后所有实例操作都会使用当前令牌。
-- 「测试」重新验证某个令牌，不会切换当前令牌。
+- 所有添加的令牌都会加入并发池，读取实例、账户余额、流量和活动；同一个实例不会重复显示。
+- 「设为默认」只决定新建实例时默认选中的账户，不会停用其他令牌。
+- 实例的开关机、重启、详情和删除会自动按所属账户路由，不需要手动切换令牌。
+- 「部署实例」页面可以选择本次创建使用哪个账户。
+- 「测试」重新验证某个令牌，不会改变默认令牌，也不会影响其他令牌。
 - 「删除」只移除本机保存的令牌，不会撤销 Linode 上的 Personal Access Token。
 - 如果存在 `LINODE_API_TOKEN`，可使用「从 .env 导入」把它迁移到 Web 管理，然后从 `.env` 中删除。
 
@@ -146,12 +152,12 @@ Root 密码只随创建请求发送到本地后端，再由后端转发给 Linod
 | `GET` | `/api/settings` | 令牌与代理的公开设置（不含明文凭据） |
 | `POST` | `/api/settings/tokens` | 验证并添加令牌 |
 | `POST` | `/api/settings/tokens/import-env` | 从 `.env` 导入回退令牌 |
-| `POST` | `/api/settings/tokens/:id/activate` | 验证并切换当前令牌 |
+| `POST` | `/api/settings/tokens/:id/activate` | 验证并设为默认令牌 |
 | `POST` | `/api/settings/tokens/:id/test` | 测试指定令牌 |
 | `DELETE` | `/api/settings/tokens/:id` | 删除本地保存的令牌 |
 | `PUT` | `/api/settings/proxy` | 保存 SOCKS 代理设置 |
 | `POST` | `/api/settings/proxy/test` | 测试代理连通性 |
-| `POST` | `/api/settings/test-connection` | 同时诊断代理与当前令牌 |
+| `POST` | `/api/settings/test-connection` | 同时诊断代理与全部令牌 |
 | `GET` | `/api/overview` | 账户、流量、实例和活动 |
 | `GET` | `/api/catalog` | 区域、规格和镜像 |
 | `GET` | `/api/availability/:region` | 区域规格可用性 |
@@ -160,9 +166,9 @@ Root 密码只随创建请求发送到本地后端，再由后端转发给 Linod
 | `POST` | `/api/instances/:id/actions/:action` | `boot`、`shutdown`、`reboot` |
 | `DELETE` | `/api/instances/:id` | 删除实例 |
 
-凭据优先级：Web 中启用的令牌 > 服务端 `LINODE_API_TOKEN`。浏览器不再发送或保存 API 令牌。
+读取时，所有 Web 令牌并行工作；只有在没有任何 Web 令牌时才使用服务端 `LINODE_API_TOKEN` 回退。写操作按实例所属的 `tokenId` 路由；创建实例时由请求体中的 `tokenId` 指定目标账户。浏览器不再发送或保存 API 令牌。
 
-所有写操作还需要携带 `X-Linode-Pilot: 1` 请求头。前端会自动添加；这个自定义头用于阻止跨站表单伪造请求（CSRF）。
+所有写操作还需要携带 `X-CloudVMController: 1` 请求头。前端会自动添加；这个自定义头用于阻止跨站表单伪造请求（CSRF）。旧版 `X-Linode-Pilot` 请求头仍兼容。
 
 ## 开发与测试
 
@@ -178,6 +184,7 @@ npm test
 
 - 静态页面与安全响应头
 - 多令牌加密存储、切换和删除，公开接口不泄露凭据
+- 多账户实例聚合、账户筛选和操作路由
 - 本地 SOCKS5 代理转发
 - 账户概览代理
 - Linode 分页参数校验（`page_size` 必须为 25–500）
@@ -238,7 +245,7 @@ npm test
 
 **401 / Token invalid**
 
-令牌可能已过期、被撤销，或粘贴时包含了多余字符。在「连接与设置」中测试当前令牌；如仍失败，重新生成令牌后添加并启用。若走代理，先用「测试代理」排除网络问题。
+令牌可能已过期、被撤销，或粘贴时包含了多余字符。在「连接与设置」中逐个测试令牌；如仍失败，重新生成令牌后添加并设为默认。若走代理，先用「测试代理」排除网络问题。
 
 **页面显示已连接，但概览加载失败**
 
@@ -246,4 +253,4 @@ npm test
 
 ## 说明
 
-Linode Pilot 是第三方本地工具，与 Akamai / Linode 没有官方关联。使用前请确认账户余额、计费方式和 API 令牌权限；创建、删除和变更实例产生的费用与后果由账户持有人承担。
+CloudVMController 是第三方本地工具，与 Akamai / Linode 没有官方关联。使用前请确认账户余额、计费方式和 API 令牌权限；创建、删除和变更实例产生的费用与后果由账户持有人承担。

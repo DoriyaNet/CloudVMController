@@ -9,12 +9,21 @@ export class ApiError extends Error {
 }
 
 export function createApi({ onUnauthorized } = {}) {
+  function withTokenQuery(path, tokenId) {
+    if (!tokenId) {
+      return path;
+    }
+    const separator = path.includes("?") ? "&" : "?";
+    return `${path}${separator}tokenId=${encodeURIComponent(tokenId)}`;
+  }
+
   async function request(
     path,
     { method = "GET", body, signal, skipUnauthorized = false } = {},
   ) {
     const headers = {
       Accept: "application/json",
+      "X-CloudVMController": "1",
       "X-Linode-Pilot": "1",
     };
     if (body !== undefined) {
@@ -99,14 +108,39 @@ export function createApi({ onUnauthorized } = {}) {
     testConnection: () =>
       request("/settings/test-connection", { method: "POST" }),
     overview: (options) => request("/overview", options),
-    catalog: (options) => request("/catalog", options),
-    detail: (id, options) => request(`/instances/${id}/detail`, options),
-    availability: (region, options) =>
-      request(`/availability/${encodeURIComponent(region)}`, options),
+    catalog: (tokenId, options) =>
+      request(withTokenQuery("/catalog", tokenId), {
+        ...options,
+        skipUnauthorized: true,
+      }),
+    detail: (id, tokenId, options) =>
+      request(withTokenQuery(`/instances/${id}/detail`, tokenId), {
+        ...options,
+        skipUnauthorized: true,
+      }),
+    availability: (region, tokenId, options) =>
+      request(
+        withTokenQuery(
+          `/availability/${encodeURIComponent(region)}`,
+          tokenId,
+        ),
+        { ...options, skipUnauthorized: true },
+      ),
     createInstance: (payload) =>
-      request("/instances", { method: "POST", body: payload }),
-    action: (id, action) =>
-      request(`/instances/${id}/actions/${action}`, { method: "POST" }),
-    remove: (id) => request(`/instances/${id}`, { method: "DELETE" }),
+      request("/instances", {
+        method: "POST",
+        body: payload,
+        skipUnauthorized: true,
+      }),
+    action: (id, action, tokenId) =>
+      request(withTokenQuery(`/instances/${id}/actions/${action}`, tokenId), {
+        method: "POST",
+        skipUnauthorized: true,
+      }),
+    remove: (id, tokenId) =>
+      request(withTokenQuery(`/instances/${id}`, tokenId), {
+        method: "DELETE",
+        skipUnauthorized: true,
+      }),
   };
 }

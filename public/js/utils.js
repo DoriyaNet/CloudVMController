@@ -379,7 +379,7 @@ export function randomInstanceLabel() {
   const words = ["nova", "atlas", "orbit", "ember", "north", "pixel", "sable", "drift"];
   const bytes = crypto.getRandomValues(new Uint8Array(3));
   const suffix = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-  return `pilot-${words[bytes[0] % words.length]}-${suffix.slice(0, 4)}`;
+  return `vm-${words[bytes[0] % words.length]}-${suffix.slice(0, 4)}`;
 }
 
 export function debounce(callback, delay = 120) {

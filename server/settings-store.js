@@ -172,7 +172,7 @@ export class SettingsStore {
     } catch {
       throw new SettingsStoreError(
         "INVALID_SETTINGS_FILE",
-        "data/settings.json is not valid JSON. Fix or remove it before starting Linode Pilot.",
+        "data/settings.json is not valid JSON. Fix or remove it before starting CloudVMController.",
         500,
       );
     }
@@ -230,6 +230,8 @@ export class SettingsStore {
         source: "web",
         label: record.label,
         tokenId: record.id,
+        accountLabel: record.accountLabel || "",
+        active: true,
       };
     }
     if (this.envToken) {
@@ -237,10 +239,43 @@ export class SettingsStore {
         token: this.envToken,
         source: "env",
         label: "服务端 .env 令牌",
-        tokenId: null,
+        tokenId: "env",
+        accountLabel: "",
+        active: true,
       };
     }
-    return { token: "", source: "none", label: "", tokenId: null };
+    return {
+      token: "",
+      source: "none",
+      label: "",
+      tokenId: null,
+      accountLabel: "",
+      active: false,
+    };
+  }
+
+  getCredentials() {
+    const credentials = this.state.tokens.map((record) => ({
+      token: decrypt(record.encrypted, this.key),
+      source: "web",
+      label: record.label,
+      tokenId: record.id,
+      accountLabel: record.accountLabel || "",
+      active: record.id === this.state.activeTokenId,
+    }));
+
+    if (credentials.length === 0 && this.envToken) {
+      credentials.push({
+        token: this.envToken,
+        source: "env",
+        label: "服务端 .env 令牌",
+        tokenId: "env",
+        accountLabel: "",
+        active: true,
+      });
+    }
+
+    return credentials;
   }
 
   getTokenById(id) {
@@ -261,12 +296,31 @@ export class SettingsStore {
   getPublicSettings() {
     const credential = this.getCredential();
     const activeRecord = this.getActiveTokenRecord();
+    const credentials = this.state.tokens.map((token) => ({
+      id: token.id,
+      label: token.label,
+      accountLabel: token.accountLabel || "",
+      source: "web",
+      active: token.id === this.state.activeTokenId,
+    }));
+    if (credentials.length === 0 && this.envToken) {
+      credentials.push({
+        id: "env",
+        label: "服务端 .env 令牌",
+        accountLabel: "",
+        source: "env",
+        active: true,
+      });
+    }
+
     return {
       tokenConfigured: Boolean(credential.token),
       credentialSource: credential.source,
       credentialLabel: credential.label,
       activeTokenId: activeRecord?.id || null,
       envTokenConfigured: Boolean(this.envToken),
+      poolSize: credentials.length,
+      credentials,
       tokens: this.state.tokens.map((token) => ({
         id: token.id,
         label: token.label,

@@ -1,9 +1,9 @@
 {
-  "name": "linode-pilot",
+  "name": "cloudvmcontroller",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "A focused local control panel for Linode / Akamai Cloud instances.",
+  "description": "A sharp local control panel for Linode / Akamai Cloud instances.",
   "engines": {
     "node": ">=20"
   },

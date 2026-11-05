@@ -46,7 +46,9 @@ const port = Number.isFinite(rawPort) ? rawPort : 4173;
 const apiBase = process.env.LINODE_API_BASE || DEFAULT_API_BASE;
 const envToken = String(process.env.LINODE_API_TOKEN || "").trim();
 const dataDir = path.resolve(
-  process.env.LINODE_PILOT_DATA_DIR || path.join(process.cwd(), "data"),
+  process.env.CLOUDVM_DATA_DIR ||
+    process.env.LINODE_PILOT_DATA_DIR ||
+    path.join(process.cwd(), "data"),
 );
 
 let settingsStore;
@@ -75,10 +77,18 @@ server.on("error", (error) => {
 server.listen(port, host, () => {
   const displayHost = host === "0.0.0.0" ? "127.0.0.1" : host;
   console.log("");
-  console.log("  Linode Pilot");
+  console.log("  CloudVMController");
   console.log(`  Local:   http://${displayHost}:${port}`);
   console.log(`  API:     ${apiBase}`);
-  console.log(`  Token:   ${publicSettings.credentialSource === "none" ? "not configured" : publicSettings.credentialLabel}`);
+  console.log(
+    `  Token:   ${
+      publicSettings.credentialSource === "none"
+        ? "not configured"
+        : publicSettings.poolSize > 1
+          ? `${publicSettings.poolSize} tokens (multi-account)`
+          : publicSettings.credentialLabel
+    }`,
+  );
   console.log(`  Data:    ${dataDir}`);
   console.log("");
 });

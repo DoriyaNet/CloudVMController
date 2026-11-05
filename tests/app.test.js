@@ -7,6 +7,12 @@ import test from "node:test";
 
 import { createRequestHandler } from "../server/app.js";
 import { openSettingsStore } from "../server/settings-store.js";
+import {
+  renderCreate,
+  renderInstances,
+  renderOverview,
+  renderSettings,
+} from "../public/js/views.js";
 import { createMockLinode } from "./helpers/mock-linode.js";
 import { createSocks5Server } from "./helpers/socks5-server.js";
 
@@ -88,6 +94,8 @@ test("stores multiple web-managed tokens and switches the active credential", as
   const secondPayload = await second.json();
   assert.equal(second.status, 201);
   assert.equal(secondPayload.settings.tokens.length, 2);
+  assert.equal(secondPayload.settings.poolSize, 2);
+  assert.equal(secondPayload.settings.credentials.length, 2);
   assert.equal(secondPayload.settings.activeTokenId, firstPayload.tokenId);
 
   const activate = await fetch(
@@ -101,7 +109,18 @@ test("stores multiple web-managed tokens and switches the active credential", as
 
   const overview = await fetch(`${stack.baseUrl}/api/overview`);
   assert.equal(overview.status, 200);
-  assert.equal((await overview.json()).instances.length, 6);
+  const overviewPayload = await overview.json();
+  assert.equal(overviewPayload.instances.length, 8);
+  assert.equal(overviewPayload.accounts.length, 2);
+  assert.ok(
+    overviewPayload.instances.some(
+      (instance) =>
+        instance.label === "tokyo-batch" &&
+        instance.tokenId === secondPayload.tokenId,
+    ),
+  );
+  assert.ok(Math.abs(overviewPayload.transfer.used - 233.4) < 0.001);
+  assert.ok(Math.abs(overviewPayload.account.balance - 54.68) < 0.001);
 
   const remove = await fetch(
     `${stack.baseUrl}/api/settings/tokens/${secondPayload.tokenId}`,
@@ -114,6 +133,198 @@ test("stores multiple web-managed tokens and switches the active credential", as
   assert.equal(remove.status, 200);
   assert.equal(removed.settings.tokens.length, 1);
   assert.equal(removed.settings.activeTokenId, firstPayload.tokenId);
+});
+
+test("routes instance operations and creation to the owning account", async (t) => {
+  const stack = await startStack({ envToken: "" });
+  t.after(() => stack.close());
+  const headers = {
+    "Content-Type": "application/json",
+    "X-Linode-Pilot": "1",
+  };
+
+  const primary = await fetch(`${stack.baseUrl}/api/settings/tokens`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ label: "Primary", token: stack.mock.token }),
+  }).then((response) => response.json());
+  const backup = await fetch(`${stack.baseUrl}/api/settings/tokens`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ label: "Orbit", token: stack.mock.altToken }),
+  }).then((response) => response.json());
+
+  const initial = await fetch(`${stack.baseUrl}/api/overview`).then((response) =>
+    response.json(),
+  );
+  assert.equal(initial.instances.length, 8);
+  assert.equal(initial.accounts.length, 2);
+  const altInstance = initial.instances.find(
+    (instance) => instance.label === "tokyo-batch",
+  );
+  assert.equal(altInstance.tokenId, backup.tokenId);
+  assert.equal(altInstance.accountLabel, "Rina Sato");
+
+  const detail = await fetch(
+    `${stack.baseUrl}/api/instances/72000001/detail?tokenId=${backup.tokenId}`,
+  );
+  const detailPayload = await detail.json();
+  assert.equal(detail.status, 200);
+  assert.equal(detailPayload.instance.tokenId, backup.tokenId);
+  assert.equal(detailPayload.instance.accountLabel, "Rina Sato");
+
+  const resolvedInstance = await fetch(
+    `${stack.baseUrl}/api/instances/72000001`,
+  ).then((response) => response.json());
+  assert.equal(resolvedInstance.tokenId, backup.tokenId);
+  assert.equal(resolvedInstance.accountLabel, "Rina Sato");
+
+  const diagnostic = await fetch(
+    `${stack.baseUrl}/api/settings/test-connection`,
+    { method: "POST", headers: { "X-Linode-Pilot": "1" } },
+  ).then((response) => response.json());
+  assert.equal(diagnostic.ok, true);
+  assert.equal(diagnostic.tokens.length, 2);
+  assert.equal(diagnostic.token.okCount, 2);
+
+  const shutdown = await fetch(
+    `${stack.baseUrl}/api/instances/72000001/actions/shutdown`,
+    { method: "POST", headers: { "X-Linode-Pilot": "1" } },
+  );
+  assert.equal(shutdown.status, 200);
+  const afterAction = await fetch(`${stack.baseUrl}/api/overview`).then(
+    (response) => response.json(),
+  );
+  assert.equal(
+    afterAction.instances.find((instance) => instance.id === 72000001).status,
+    "offline",
+  );
+
+  const created = await fetch(`${stack.baseUrl}/api/instances`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      tokenId: backup.tokenId,
+      label: "orbit-new",
+      region: "ap-northeast",
+      type: "g6-standard-1",
+      image: "linode/debian12",
+      root_pass: "long-enough-password",
+    }),
+  });
+  const createdPayload = await created.json();
+  assert.equal(created.status, 201);
+  assert.equal(createdPayload.instance.tokenId, backup.tokenId);
+  assert.equal(createdPayload.instance.accountLabel, "Rina Sato");
+
+  const createRequest = [...stack.mock.requests]
+    .reverse()
+    .find(
+      (entry) =>
+        entry.method === "POST" && entry.path === "/linode/instances",
+    );
+  assert.equal(
+    createRequest.headers.authorization,
+    `Bearer ${stack.mock.altToken}`,
+  );
+  assert.notEqual(backup.tokenId, primary.tokenId);
+});
+
+test("renders multi-account views with account filtering and create selector", async (t) => {
+  const stack = await startStack({ envToken: "" });
+  t.after(() => stack.close());
+  const headers = {
+    "Content-Type": "application/json",
+    "X-Linode-Pilot": "1",
+  };
+  const primary = await fetch(`${stack.baseUrl}/api/settings/tokens`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ label: "Northstar", token: stack.mock.token }),
+  }).then((response) => response.json());
+  const backup = await fetch(`${stack.baseUrl}/api/settings/tokens`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ label: "Orbit", token: stack.mock.altToken }),
+  }).then((response) => response.json());
+
+  const overview = await fetch(`${stack.baseUrl}/api/overview`).then(
+    (response) => response.json(),
+  );
+  const catalog = await fetch(
+    `${stack.baseUrl}/api/catalog?tokenId=${primary.tokenId}`,
+  ).then((response) => response.json());
+  const settings = await fetch(`${stack.baseUrl}/api/settings`).then(
+    (response) => response.json(),
+  );
+  const state = {
+    overview,
+    overviewError: null,
+    settings,
+    catalog,
+    filters: {
+      query: "",
+      status: "all",
+      region: "all",
+      account: "all",
+    },
+    prefs: { autoRefresh: true },
+    create: {
+      tokenId: primary.tokenId,
+      label: "orbit-demo",
+      region: "ap-south",
+      type: "g6-standard-1",
+      image: "linode/ubuntu24.04",
+      rootPass: "",
+      tags: "",
+      sshKeys: "",
+      userData: "",
+      backups: false,
+      privateIp: false,
+      booted: true,
+      passwordVisible: false,
+      advancedOpen: false,
+    },
+    availability: {
+      loading: false,
+      region: "ap-south",
+      plans: null,
+      error: "",
+    },
+    creating: false,
+    createError: "",
+    session: {
+      apiBase: stack.mock.apiBase,
+      version: "1.0.0",
+    },
+    busyActions: new Set(),
+    refreshing: false,
+    authInvalid: false,
+  };
+
+  const overviewHtml = renderOverview(state);
+  assert.match(overviewHtml, /2 个账户同时工作/);
+  assert.match(overviewHtml, /Orbit Works|Rina Sato/);
+
+  const instancesHtml = renderInstances(state);
+  assert.match(instancesHtml, /id="account-filter"/);
+  assert.match(instancesHtml, /tokyo-batch/);
+  assert.match(instancesHtml, /Rina Sato/);
+
+  state.filters.account = backup.tokenId;
+  const filteredHtml = renderInstances(state);
+  assert.match(filteredHtml, /tokyo-batch/);
+  assert.doesNotMatch(filteredHtml, /pilot-edge-01/);
+
+  const createHtml = renderCreate(state);
+  assert.match(createHtml, /id="create-token"/);
+  assert.match(createHtml, new RegExp(`value="${backup.tokenId}"`));
+  assert.match(createHtml, /所有令牌会同时读取实例/);
+
+  const settingsHtml = renderSettings(state);
+  assert.match(settingsHtml, /2 个令牌同时工作/);
+  assert.match(settingsHtml, /所有令牌会并行读取/);
+  assert.match(settingsHtml, /设为默认/);
 });
 
 test("encrypts tokens at rest and can reopen saved settings", async () => {
@@ -266,7 +477,7 @@ test("serves the control panel with restrictive security headers", async (t) => 
 
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type"), /text\/html/);
-  assert.match(html, /Linode Pilot/);
+  assert.match(html, /CloudVMController/);
   assert.match(response.headers.get("content-security-policy"), /default-src 'self'/);
   assert.equal(response.headers.get("x-frame-options"), "DENY");
 });

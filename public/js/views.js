@@ -80,6 +80,18 @@ function primaryIp(instance) {
   return instance?.ipv4?.[0] || "";
 }
 
+function accountNameForInstance(instance) {
+  return instance?.accountLabel || instance?.tokenLabel || "";
+}
+
+function accountBadge(instance, { compact = false } = {}) {
+  const label = accountNameForInstance(instance);
+  if (!label) {
+    return "";
+  }
+  return `<span class="account-chip${compact ? " is-compact" : ""}" title="所属账户">${icon("key")}<span>${escapeHtml(label)}</span></span>`;
+}
+
 function compactInstanceRow(state, instance) {
   const region = getRegion(state, instance.region);
   const plan = getPlan(state, instance.type);
@@ -91,6 +103,7 @@ function compactInstanceRow(state, instance) {
       class="compact-instance"
       data-action="open-detail"
       data-id="${escapeHtml(instance.id)}"
+      data-token-id="${escapeHtml(instance.tokenId || "")}"
       aria-label="查看 ${escapeHtml(instance.label || instance.id)} 详情"
     >
       <span class="compact-instance-primary">
@@ -98,6 +111,7 @@ function compactInstanceRow(state, instance) {
         <span class="compact-instance-copy">
           <strong>${escapeHtml(instance.label || `linode-${instance.id}`)}</strong>
           <small>${escapeHtml(region?.label || instance.region || "未知区域")} · ${escapeHtml(typeDisplay(instance.type, plan))}</small>
+          <small class="compact-instance-account">${escapeHtml(accountNameForInstance(instance))}</small>
         </span>
       </span>
       <span class="compact-instance-status">${statusBadge(instance.status, { compact: true })}</span>
@@ -135,10 +149,39 @@ function eventItem(event, { compact = false } = {}) {
           <span class="event-state event-state-${escapeHtml(statusMeta.tone)}">${escapeHtml(statusMeta.label)}</span>
         </span>
         <span class="event-meta">
-          ${escapeHtml(target)} · ${escapeHtml(relativeTime(event.created))}
+          ${escapeHtml(target)} · ${escapeHtml(relativeTime(event.created))}${event.accountLabel ? ` · ${escapeHtml(event.accountLabel)}` : ""}
         </span>
       </span>
     </div>
+  `;
+}
+
+function accountPoolStrip(accounts) {
+  return `
+    <section class="account-pool panel">
+      <div class="account-pool-heading">
+        <div>
+          <span class="panel-kicker">CONNECTED ACCOUNTS</span>
+          <h2>${accounts.length} 个账户同时工作</h2>
+        </div>
+        <span class="panel-note">并行聚合</span>
+      </div>
+      <div class="account-pool-list">
+        ${accounts
+          .map(
+            (account) => `
+              <span class="account-pool-item${account.ok ? "" : " is-error"}">
+                <span class="account-pool-dot"></span>
+                <span>
+                  <strong>${escapeHtml(account.label || account.tokenLabel || "Linode 账户")}</strong>
+                  <small>${account.instanceCount} 个实例${account.balance !== null ? ` · ${formatMoney(account.balance)}` : ""}${account.error ? ` · ${escapeHtml(account.error)}` : ""}</small>
+                </span>
+              </span>
+            `,
+          )
+          .join("")}
+      </div>
+    </section>
   `;
 }
 
@@ -146,6 +189,8 @@ export function renderOverview(state) {
   const overview = state.overview;
   const instances = overview?.instances || [];
   const account = overview?.account;
+  const accounts = overview?.accounts || [];
+  const multiAccount = accounts.length > 1;
   const transfer = overview?.transfer;
   const events = overview?.events || [];
   const running = instances.filter((instance) => instance.status === "running").length;
@@ -178,184 +223,203 @@ export function renderOverview(state) {
     offline === 0 && transitional === 0
       ? "所有实例运行正常，没有需要处理的事项。"
       : `${running} 个实例正在运行，${offline} 个已关机${transitional ? `，${transitional} 个正在变更` : ""}。`;
+  const greetingName = multiAccount
+    ? `${accounts.length} 个 Linode 账户`
+    : accountName(account);
 
   return `
     <section class="page page-overview">
-      <div class="overview-hero">
-        <div class="hero-grid" aria-hidden="true"></div>
-        <div class="hero-copy">
-          <span class="eyebrow hero-eyebrow"><span class="eyebrow-dot"></span>${escapeHtml(currentDate)}</span>
-          <h1>${greeting()}，${escapeHtml(accountName(account))}</h1>
-          <p>${escapeHtml(healthCopy)}</p>
-          <div class="hero-actions">
-            <a class="button button-primary" href="#create">
-              ${icon("plus")}
-              <span>部署新实例</span>
-            </a>
-            <a class="button button-secondary" href="#instances">
-              <span>查看全部实例</span>
-              ${icon("arrow-up-right")}
-            </a>
-          </div>
+      <header class="page-header console-header">
+        <div class="page-heading">
+          <span class="page-eyebrow"><span class="status-dot ${offline === 0 ? "is-ok" : "is-warn"}"></span> CLOUD INFRASTRUCTURE</span>
+          <h1>基础设施概览</h1>
+          <p>${escapeHtml(greeting())}，${escapeHtml(greetingName)}。${escapeHtml(healthCopy)}</p>
         </div>
-        <div class="hero-visual" aria-hidden="true">
-          <span class="orbit orbit-one"></span>
-          <span class="orbit orbit-two"></span>
-          <span class="orbit orbit-three"></span>
-          <span class="orbit-node node-one"></span>
-          <span class="orbit-node node-two"></span>
-          <span class="orbit-node node-three"></span>
-          <span class="hero-core">${icon("cloud")}</span>
-          <span class="hero-readout"><i></i> ${running}/${instances.length} ONLINE</span>
+        <div class="page-header-actions">
+          <button type="button" class="button button-secondary" data-action="refresh-overview">
+            ${state.refreshing ? spinner() : icon("refresh")}
+            <span>同步状态</span>
+          </button>
+          <a class="button button-primary" href="#create">${icon("plus")}<span>新建实例</span></a>
         </div>
+      </header>
+
+      <div class="system-strip">
+        <span class="system-health ${offline === 0 ? "is-ok" : "is-warn"}">
+          <span class="status-dot"></span>
+          ${offline === 0 ? "所有系统运行正常" : `${offline} 个实例已停止`}
+        </span>
+        <span class="system-strip-divider"></span>
+        <span>${running} 运行中</span>
+        <span>${transitional} 变更中</span>
+        <span>${regions.size} 个区域</span>
+        <span class="system-strip-spacer"></span>
+        <span class="system-date mono">${escapeHtml(currentDate)}</span>
       </div>
 
       <div class="stat-grid">
         <article class="stat-card">
-          <span class="stat-icon tone-green">${icon("server")}</span>
-          <span class="stat-label">计算实例</span>
+          <span class="stat-card-head">
+            <span class="stat-label">计算实例</span>
+            <span class="stat-icon tone-green">${icon("server")}</span>
+          </span>
           <span class="stat-value">${formatNumber(instances.length)}</span>
           <span class="stat-foot">${formatNumber(regions.size)} 个区域 <span class="stat-divider"></span> ${running} 运行中</span>
         </article>
         <article class="stat-card">
-          <span class="stat-icon tone-blue">${icon("activity")}</span>
-          <span class="stat-label">运行状态</span>
+          <span class="stat-card-head">
+            <span class="stat-label">运行状态</span>
+            <span class="stat-icon tone-blue">${icon("activity")}</span>
+          </span>
           <span class="stat-value">${running}<small> / ${instances.length}</small></span>
           <span class="stat-foot">${offline} 已关机 <span class="stat-divider"></span> ${transitional} 过渡中</span>
         </article>
         <article class="stat-card stat-card-progress">
-          <span class="stat-icon tone-amber">${icon("network")}</span>
-          <span class="stat-label">本月出站流量</span>
+          <span class="stat-card-head">
+            <span class="stat-label">本月出站流量</span>
+            <span class="stat-icon tone-amber">${icon("network")}</span>
+          </span>
           <span class="stat-value">${Number.isFinite(usedTransfer) ? formatNumber(usedTransfer) : "—"}<small> GB</small></span>
           <div class="mini-progress"><span style="width: ${transferPercent.toFixed(1)}%"></span></div>
           <span class="stat-foot">${Number.isFinite(transferQuota) ? `${formatNumber(transferQuota)} GB 配额 · ${formatPercent(transferPercent)}` : "流量数据不可用"}</span>
         </article>
         <article class="stat-card">
-          <span class="stat-icon tone-violet">${icon("wallet")}</span>
-          <span class="stat-label">账户余额</span>
+          <span class="stat-card-head">
+            <span class="stat-label">账户余额</span>
+            <span class="stat-icon tone-violet">${icon("wallet")}</span>
+          </span>
           <span class="stat-value">${account ? formatMoney(account.balance) : "—"}</span>
-          <span class="stat-foot">${account?.balance_uninvoiced !== undefined ? `${formatMoney(account.balance_uninvoiced)} 待出账` : "需要 Account 只读权限"}</span>
+          <span class="stat-foot">${
+            multiAccount
+              ? `${accounts.length} 个账户合并 · ${formatMoney(account?.balance_uninvoiced ?? 0)} 待出账`
+              : account?.balance_uninvoiced !== undefined
+                ? `${formatMoney(account.balance_uninvoiced)} 待出账`
+                : "需要 Account 只读权限"
+          }</span>
         </article>
       </div>
 
       ${state.overviewError ? renderInlineError(state.overviewError) : ""}
+      ${multiAccount ? accountPoolStrip(accounts) : ""}
 
       <div class="overview-grid">
-        <section class="panel instances-overview-panel">
-          <div class="panel-heading">
-            <div>
-              <span class="panel-kicker">FLEET</span>
-              <h2>计算实例</h2>
+        <div class="overview-column overview-column-main">
+          <section class="panel instances-overview-panel">
+            <div class="panel-heading">
+              <div>
+                <span class="panel-kicker">FLEET</span>
+                <h2>实例</h2>
+              </div>
+              <a class="text-link" href="#instances">查看全部 ${icon("chevron-right")}</a>
             </div>
-            <a class="text-link" href="#instances">全部实例 ${icon("chevron-right")}</a>
-          </div>
-          <div class="compact-instance-list">
-            ${
-              instances.length > 0
-                ? instances
-                    .slice()
-                    .sort((left, right) => {
-                      const order = { running: 0, transitional: 1, offline: 2 };
-                      const leftOrder = isTransitional(left.status) ? 1 : order[left.status] ?? 2;
-                      const rightOrder = isTransitional(right.status) ? 1 : order[right.status] ?? 2;
-                      return leftOrder - rightOrder;
+            <div class="compact-instance-list">
+              ${
+                instances.length > 0
+                  ? instances
+                      .slice()
+                      .sort((left, right) => {
+                        const order = { running: 0, transitional: 1, offline: 2 };
+                        const leftOrder = isTransitional(left.status) ? 1 : order[left.status] ?? 2;
+                        const rightOrder = isTransitional(right.status) ? 1 : order[right.status] ?? 2;
+                        return leftOrder - rightOrder;
+                      })
+                      .slice(0, 6)
+                      .map((instance) => compactInstanceRow(state, instance))
+                      .join("")
+                  : emptyState({
+                      iconName: "server",
+                      title: "还没有计算实例",
+                      description: "选择一个区域和配置，几分钟内即可完成部署。",
+                      action: `<a class="button button-primary button-sm" href="#create">${icon("plus")}创建实例</a>`,
                     })
-                    .slice(0, 6)
-                    .map((instance) => compactInstanceRow(state, instance))
-                    .join("")
-                : emptyState({
-                    iconName: "server",
-                    title: "还没有计算实例",
-                    description: "选择一个区域和配置，几分钟内即可完成部署。",
-                    action: `<a class="button button-primary button-sm" href="#create">${icon("plus")}创建实例</a>`,
-                  })
-            }
-          </div>
-        </section>
+              }
+            </div>
+          </section>
 
-        <section class="panel traffic-panel">
-          <div class="panel-heading">
-            <div>
-              <span class="panel-kicker">TRANSFER</span>
-              <h2>流量池</h2>
+          <section class="panel activity-panel">
+            <div class="panel-heading">
+              <div>
+                <span class="panel-kicker">ACTIVITY</span>
+                <h2>最近活动</h2>
+              </div>
+              <span class="panel-note">${events.length} 条</span>
             </div>
-            <span class="panel-note">本月</span>
-          </div>
-          <div class="traffic-visual">
-            <div class="traffic-ring" style="--traffic-progress: ${transferPercent.toFixed(1)}%">
-              <span class="traffic-ring-inner">
-                <strong>${formatPercent(transferPercent)}</strong>
-                <small>已使用</small>
-              </span>
-            </div>
-            <div class="traffic-copy">
-              <span class="traffic-label">出站流量</span>
-              <strong>${Number.isFinite(usedTransfer) ? formatTransfer(usedTransfer) : "—"}</strong>
-              <span class="traffic-quota">${Number.isFinite(transferQuota) ? `共 ${formatTransfer(transferQuota)}` : "配额不可用"}</span>
-            </div>
-          </div>
-          <div class="traffic-meta">
-            <span><i class="legend-dot legend-green"></i> 免费配额内</span>
-            <span>${transfer ? "按账户当前周期统计" : "查看账户了解详情"}</span>
-          </div>
-        </section>
-
-        <section class="panel activity-panel">
-          <div class="panel-heading">
-            <div>
-              <span class="panel-kicker">ACTIVITY</span>
-              <h2>最近活动</h2>
-            </div>
-            <span class="panel-note">${events.length} 条</span>
-          </div>
-          <div class="event-list">
-            ${
-              events.length > 0
-                ? events.slice(0, 6).map((event) => eventItem(event, { compact: true })).join("")
-                : emptyState({
-                    iconName: "activity",
-                    title: "暂无近期活动",
-                    description: "对实例执行操作后，事件会显示在这里。",
-                  })
-            }
-          </div>
-        </section>
-
-        <section class="panel region-panel">
-          <div class="panel-heading">
-            <div>
-              <span class="panel-kicker">DISTRIBUTION</span>
-              <h2>区域分布</h2>
-            </div>
-            <span class="panel-note">${regions.size} 个区域</span>
-          </div>
-          <div class="region-bars">
-            ${
-              regionRows.length > 0
-                ? regionRows
-                    .map(([regionId, count]) => {
-                      const region = getRegion(state, regionId);
-                      const percent = (count / maxRegionCount) * 100;
-                      return `
-                        <div class="region-bar-row">
-                          <span class="region-bar-label">
-                            <span>${countryFlag(region?.country)} ${escapeHtml(region?.label || regionId)}</span>
-                            <strong>${count}</strong>
-                          </span>
-                          <span class="region-bar-track"><i style="width: ${percent.toFixed(1)}%"></i></span>
-                        </div>
-                      `;
+            <div class="event-list">
+              ${
+                events.length > 0
+                  ? events.slice(0, 6).map((event) => eventItem(event, { compact: true })).join("")
+                  : emptyState({
+                      iconName: "activity",
+                      title: "暂无近期活动",
+                      description: "对实例执行操作后，事件会显示在这里。",
                     })
-                    .join("")
-                : `<p class="muted-copy">创建实例后显示区域分布。</p>`
-            }
-          </div>
-          <a class="region-cta" href="#create">
-            <span class="region-cta-icon">${icon("globe")}</span>
-            <span><strong>扩展你的基础设施</strong><small>在更多区域部署边缘节点</small></span>
-            ${icon("arrow-up-right")}
-          </a>
-        </section>
+              }
+            </div>
+          </section>
+        </div>
+
+        <div class="overview-column overview-column-side">
+          <section class="panel traffic-panel">
+            <div class="panel-heading">
+              <div>
+                <span class="panel-kicker">TRANSFER</span>
+                <h2>流量用量</h2>
+              </div>
+              <span class="panel-note mono">${formatPercent(transferPercent)}</span>
+            </div>
+            <div class="traffic-visual traffic-visual-linear">
+              <div class="traffic-summary">
+                <span class="traffic-copy">
+                  <span class="traffic-label">本月出站</span>
+                  <strong>${Number.isFinite(usedTransfer) ? formatTransfer(usedTransfer) : "—"}</strong>
+                  <span class="traffic-quota">${Number.isFinite(transferQuota) ? `共 ${formatTransfer(transferQuota)}` : "配额不可用"}</span>
+                </span>
+              </div>
+              <div class="quota-bar" aria-hidden="true"><i style="width: ${transferPercent.toFixed(1)}%"></i></div>
+              <div class="quota-scale"><span>0</span><span>${Number.isFinite(transferQuota) ? formatTransfer(transferQuota) : "—"}</span></div>
+            </div>
+            <div class="traffic-meta">
+              <span><i class="legend-dot legend-green"></i> 免费配额内</span>
+              <span>${transfer ? "当前计费周期" : "查看账户了解详情"}</span>
+            </div>
+          </section>
+
+          <section class="panel region-panel">
+            <div class="panel-heading">
+              <div>
+                <span class="panel-kicker">DISTRIBUTION</span>
+                <h2>区域分布</h2>
+              </div>
+              <span class="panel-note">${regions.size} 个区域</span>
+            </div>
+            <div class="region-bars">
+              ${
+                regionRows.length > 0
+                  ? regionRows
+                      .map(([regionId, count]) => {
+                        const region = getRegion(state, regionId);
+                        const percent = (count / maxRegionCount) * 100;
+                        return `
+                          <div class="region-bar-row">
+                            <span class="region-bar-label">
+                              <span>${countryFlag(region?.country)} ${escapeHtml(region?.label || regionId)}</span>
+                              <strong>${count}</strong>
+                            </span>
+                            <span class="region-bar-track"><i style="width: ${percent.toFixed(1)}%"></i></span>
+                          </div>
+                        `;
+                      })
+                      .join("")
+                  : `<p class="muted-copy">创建实例后显示区域分布。</p>`
+              }
+            </div>
+            <a class="region-cta" href="#create">
+              <span class="region-cta-icon">${icon("globe")}</span>
+              <span><strong>扩展基础设施</strong><small>在更多区域部署实例</small></span>
+              ${icon("arrow-up-right")}
+            </a>
+          </section>
+        </div>
       </div>
     </section>
   `;
@@ -365,11 +429,13 @@ function matchesFilters(state, instance) {
   const query = state.filters.query.trim().toLowerCase();
   const status = state.filters.status;
   const region = state.filters.region;
+  const account = state.filters.account;
 
   if (status === "running" && instance.status !== "running") return false;
   if (status === "offline" && instance.status !== "offline") return false;
   if (status === "transitional" && !isTransitional(instance.status)) return false;
   if (region !== "all" && instance.region !== region) return false;
+  if (account !== "all" && instance.tokenId !== account) return false;
 
   if (!query) {
     return true;
@@ -399,6 +465,7 @@ function quickActionButton(state, instance, operation, label, iconName) {
       class="power-button${operation === "shutdown" ? " power-button-danger" : ""}"
       data-action="instance-action"
       data-id="${escapeHtml(instance.id)}"
+      data-token-id="${escapeHtml(instance.tokenId || "")}"
       data-operation="${operation}"
       title="${escapeHtml(label)}"
       aria-label="${escapeHtml(label)}"
@@ -416,6 +483,7 @@ function instanceCard(state, instance) {
   const price = getPlanPrice(plan, instance.region);
   const transitional = isTransitional(instance.status);
   const tags = Array.isArray(instance.tags) ? instance.tags : [];
+  const accountLabel = accountNameForInstance(instance);
 
   const actions =
     instance.status === "running"
@@ -426,68 +494,68 @@ function instanceCard(state, instance) {
         : "";
 
   return `
-    <article class="instance-card">
-      <div class="instance-card-head">
-        <span class="server-tile server-tile-lg">${icon("server")}</span>
-        <div class="instance-card-heading">
-          <h3>
-            <button type="button" data-action="open-detail" data-id="${escapeHtml(instance.id)}">
-              ${escapeHtml(instance.label || `linode-${instance.id}`)}
-            </button>
-          </h3>
-          <p>${countryFlag(region?.country)} ${escapeHtml(region?.label || instance.region || "未知区域")} <span>·</span> ${escapeHtml(typeDisplay(instance.type, plan))}</p>
-        </div>
-        ${statusBadge(instance.status)}
-      </div>
-
-      <div class="instance-address">
-        <span class="address-label">${icon("globe")} 公网 IPv4</span>
-        <span class="address-value mono">${escapeHtml(ip || "未分配")}</span>
-        ${
-          ip
-            ? `<button type="button" class="copy-button" data-copy="${escapeHtml(ip)}" aria-label="复制 IP" title="复制 IP">${icon("copy")}</button>`
-            : ""
-        }
-      </div>
-
-      <div class="spec-grid">
-        <span class="spec-item">
-          <span class="spec-icon">${icon("cpu")}</span>
-          <span><small>vCPU</small><strong>${formatNumber(instance.specs?.vcpus ?? plan?.vcpus)}</strong></span>
-        </span>
-        <span class="spec-item">
-          <span class="spec-icon">${icon("memory")}</span>
-          <span><small>内存</small><strong>${formatMemory(instance.specs?.memory ?? plan?.memory)}</strong></span>
-        </span>
-        <span class="spec-item">
-          <span class="spec-icon">${icon("disk")}</span>
-          <span><small>存储</small><strong>${formatDisk(instance.specs?.disk ?? plan?.disk)}</strong></span>
-        </span>
-        <span class="spec-item">
-          <span class="spec-icon">${icon("network")}</span>
-          <span><small>流量</small><strong>${formatTransfer(instance.specs?.transfer ?? plan?.transfer)}</strong></span>
-        </span>
-      </div>
-
-      <div class="instance-card-footer">
-        <div class="instance-tags">
-          ${
-            tags.length > 0
-              ? tags
-                  .slice(0, 3)
-                  .map((tag) => `<span class="tag">#${escapeHtml(tag)}</span>`)
-                  .join("") +
-                (tags.length > 3 ? `<span class="tag">+${tags.length - 3}</span>` : "")
-              : `<span class="instance-price">${price.monthly ? `${formatMoney(price.monthly)} / 月` : `ID ${escapeHtml(instance.id)}`}</span>`
-          }
-        </div>
-        <div class="instance-card-actions">
-          <button type="button" class="text-link" data-action="open-detail" data-id="${escapeHtml(instance.id)}">
-            管理实例 ${icon("arrow-up-right")}
+    <article class="instance-row">
+      <div class="instance-cell instance-name-cell" data-label="实例">
+        <span class="server-tile">${icon("server")}</span>
+        <span class="instance-name-copy">
+          <button type="button" class="instance-name" data-action="open-detail" data-id="${escapeHtml(instance.id)}" data-token-id="${escapeHtml(instance.tokenId || "")}">
+            ${escapeHtml(instance.label || `linode-${instance.id}`)}
           </button>
-          ${actions ? `<span class="quick-actions">${actions}</span>` : ""}
-          ${transitional ? `<span class="transition-label">${spinner()} 处理中</span>` : ""}
-        </div>
+          <span class="instance-row-meta">
+            <span class="mono">#${escapeHtml(instance.id)}</span>
+            ${accountLabel ? `<span>${escapeHtml(accountLabel)}</span>` : ""}
+            ${tags.length > 0 ? `<span>${escapeHtml(tags.slice(0, 2).map((tag) => `#${tag}`).join(" "))}</span>` : ""}
+          </span>
+        </span>
+      </div>
+      <div class="instance-cell instance-status-cell" data-label="状态">
+        ${statusBadge(instance.status)}
+        ${transitional ? `<span class="transition-label">${spinner()} 处理中</span>` : ""}
+      </div>
+      <div class="instance-cell instance-ip-cell" data-label="公网 IPv4">
+        <span class="ip-stack">
+          <span class="mono">${escapeHtml(ip || "未分配")}</span>
+          ${
+            ip
+              ? `<button type="button" class="copy-button" data-copy="${escapeHtml(ip)}" aria-label="复制 IP" title="复制 IP">${icon("copy")}</button>`
+              : ""
+          }
+        </span>
+      </div>
+      <div class="instance-cell instance-spec-cell" data-label="规格">
+        <span class="spec-line">${escapeHtml(typeDisplay(instance.type, plan))}</span>
+        <span class="instance-row-meta">
+          ${formatNumber(instance.specs?.vcpus ?? plan?.vcpus)} vCPU
+          <span class="meta-sep">·</span>
+          ${formatMemory(instance.specs?.memory ?? plan?.memory)}
+          <span class="meta-sep">·</span>
+          ${formatDisk(instance.specs?.disk ?? plan?.disk)}
+        </span>
+      </div>
+      <div class="instance-cell instance-region-cell" data-label="区域">
+        <span class="region-flag">${countryFlag(region?.country)}</span>
+        <span class="region-copy">
+          <strong>${escapeHtml(region?.label || instance.region || "未知区域")}</strong>
+          <small class="mono">${escapeHtml(instance.region || "—")}</small>
+        </span>
+      </div>
+      <div class="instance-cell instance-cost-cell" data-label="月费">
+        <span class="instance-price">${price.monthly ? formatMoney(price.monthly) : "—"}</span>
+        <small class="mono">/mo</small>
+      </div>
+      <div class="instance-cell instance-row-actions">
+        ${actions ? `<span class="quick-actions">${actions}</span>` : ""}
+        <button
+          type="button"
+          class="row-open"
+          data-action="open-detail"
+          data-id="${escapeHtml(instance.id)}"
+          data-token-id="${escapeHtml(instance.tokenId || "")}"
+          aria-label="管理 ${escapeHtml(instance.label || instance.id)}"
+          title="管理实例"
+        >
+          ${icon("arrow-up-right")}
+        </button>
       </div>
     </article>
   `;
@@ -513,10 +581,17 @@ export function renderInstances(state) {
   };
 
   const regions = new Map();
+  const accounts = new Map();
   for (const instance of instances) {
     if (instance.region) {
       const region = getRegion(state, instance.region);
       regions.set(instance.region, region?.label || instance.region);
+    }
+    if (instance.tokenId) {
+      accounts.set(
+        instance.tokenId,
+        instance.accountLabel || instance.tokenLabel || instance.tokenId,
+      );
     }
   }
 
@@ -572,6 +647,22 @@ export function renderInstances(state) {
             <kbd>/</kbd>
           </label>
           <label class="select-field select-field-compact">
+            ${icon("key")}
+            <select id="account-filter" aria-label="按账户筛选">
+              <option value="all">全部账户</option>
+              ${[...accounts.entries()]
+                .sort((left, right) =>
+                  String(left[1]).localeCompare(String(right[1]), "zh-CN"),
+                )
+                .map(
+                  ([tokenId, label]) =>
+                    `<option value="${escapeHtml(tokenId)}"${state.filters.account === tokenId ? " selected" : ""}>${escapeHtml(label)}</option>`,
+                )
+                .join("")}
+            </select>
+            ${icon("chevron-down")}
+          </label>
+          <label class="select-field select-field-compact">
             ${icon("globe")}
             <select id="region-filter" aria-label="按区域筛选">
               <option value="all">全部区域</option>
@@ -591,7 +682,10 @@ export function renderInstances(state) {
       <div class="list-summary">
         <span>显示 <strong>${filtered.length}</strong> 个实例</span>
         ${
-          state.filters.query || state.filters.status !== "all" || state.filters.region !== "all"
+          state.filters.query ||
+          state.filters.status !== "all" ||
+          state.filters.region !== "all" ||
+          state.filters.account !== "all"
             ? `<button type="button" class="text-button" data-action="clear-filters">清除筛选</button>`
             : `<span class="list-summary-hint">按 <kbd>/</kbd> 快速搜索</span>`
         }
@@ -603,7 +697,18 @@ export function renderInstances(state) {
 
       ${
         filtered.length > 0
-          ? `<div class="instance-grid">${filtered.map((instance) => instanceCard(state, instance)).join("")}</div>`
+          ? `<div class="instances-table">
+              <div class="instances-table-head" aria-hidden="true">
+                <span>实例</span>
+                <span>状态</span>
+                <span>公网 IPv4</span>
+                <span>规格</span>
+                <span>区域</span>
+                <span>月费</span>
+                <span></span>
+              </div>
+              <div class="instances-table-body">${filtered.map((instance) => instanceCard(state, instance)).join("")}</div>
+            </div>`
           : emptyState({
               iconName: instances.length === 0 ? "server" : "search",
               title: instances.length === 0 ? "还没有计算实例" : "没有匹配的实例",
@@ -678,6 +783,26 @@ function selectedCreatePlan(state) {
   return getPlan(state, state.create.type);
 }
 
+function createCredentials(state) {
+  const credentials = state.settings?.credentials;
+  if (Array.isArray(credentials) && credentials.length > 0) {
+    return credentials;
+  }
+  return (state.settings?.tokens || []).map((token) => ({
+    id: token.id,
+    label: token.label,
+    accountLabel: token.accountLabel || "",
+    source: "web",
+    active: token.active,
+  }));
+}
+
+function selectedCreateCredential(state) {
+  return createCredentials(state).find(
+    (credential) => credential.id === state.create.tokenId,
+  );
+}
+
 function selectedCreateRegion(state) {
   return getRegion(state, state.create.region);
 }
@@ -696,6 +821,7 @@ function createCost(state) {
 export function renderCreateSummary(state) {
   const region = selectedCreateRegion(state);
   const plan = selectedCreatePlan(state);
+  const credential = selectedCreateCredential(state);
   const price = createCost(state);
   const image = imageDisplay(state.create.image, state.catalog?.images || []);
   const passwordScore = passwordStrength(state.create.rootPass);
@@ -717,6 +843,7 @@ export function renderCreateSummary(state) {
     <div class="summary-divider"></div>
 
     <dl class="summary-list">
+      <div><dt>部署账户</dt><dd>${escapeHtml(credential?.accountLabel || credential?.label || "尚未选择")}</dd></div>
       <div><dt>实例名称</dt><dd>${escapeHtml(state.create.label || "自动生成")}</dd></div>
       <div><dt>实例规格</dt><dd>${escapeHtml(plan?.label || "尚未选择")}</dd></div>
       <div><dt>计算资源</dt><dd>${plan ? `${plan.vcpus} vCPU · ${formatMemory(plan.memory)}` : "—"}</dd></div>
@@ -802,6 +929,7 @@ export function renderCreate(state) {
   const selectedPrice = getPlanPrice(selectedPlan, state.create.region);
   const imageChoices = imageGroups(state);
   const region = selectedCreateRegion(state);
+  const credentials = createCredentials(state);
 
   const actions = `
     <a class="text-link" href="https://techdocs.akamai.com/linode-api/reference/post-linode-instance" target="_blank" rel="noreferrer">
@@ -827,6 +955,26 @@ export function renderCreate(state) {
             </div>
 
             <label class="form-field">
+              <span class="field-label">部署账户</span>
+              <span class="select-wrap">
+                <span class="select-leading">${icon("key")}</span>
+                <select id="create-token" name="tokenId" ${credentials.length <= 1 ? "disabled" : ""}>
+                  ${credentials
+                    .map(
+                      (credential) => `
+                        <option value="${escapeHtml(credential.id)}"${credential.id === state.create.tokenId ? " selected" : ""}>
+                          ${escapeHtml(credential.label)}${credential.accountLabel ? ` · ${escapeHtml(credential.accountLabel)}` : ""}${credential.active ? "（默认）" : ""}
+                        </option>
+                      `,
+                    )
+                    .join("")}
+                </select>
+                ${icon("chevron-down")}
+              </span>
+              <span class="field-hint">所有令牌会同时读取实例；这里选择新实例创建到哪个账户。</span>
+            </label>
+
+            <label class="form-field">
               <span class="field-label">实例名称</span>
               <input
                 type="text"
@@ -834,7 +982,7 @@ export function renderCreate(state) {
                 name="label"
                 maxlength="64"
                 value="${escapeHtml(state.create.label)}"
-                placeholder="例如 pilot-web-01"
+                placeholder="例如 cloudvm-web-01"
                 autocomplete="off"
               />
               <span class="field-hint">仅限字母、数字与连字符，最多 64 个字符。</span>
@@ -1087,12 +1235,18 @@ export function renderSettings(state) {
   const proxy = settings.proxy || {};
   const tokens = Array.isArray(settings.tokens) ? settings.tokens : [];
   const connected = Boolean(settings.tokenConfigured && !state.authInvalid);
+  const poolSize =
+    Number(settings.poolSize) ||
+    tokens.length ||
+    (settings.tokenConfigured ? 1 : 0);
   const credentialLabel =
-    settings.credentialSource === "web"
-      ? settings.credentialLabel || "Web 令牌"
-      : settings.credentialSource === "env"
-        ? "服务端 .env 回退令牌"
-        : "未配置";
+    poolSize > 1
+      ? `${poolSize} 个令牌同时工作`
+      : settings.credentialSource === "web"
+        ? settings.credentialLabel || "Web 令牌"
+        : settings.credentialSource === "env"
+          ? "服务端 .env 回退令牌"
+          : "未配置";
 
   return `
     <section class="page page-settings">
@@ -1119,7 +1273,7 @@ export function renderSettings(state) {
 
           <div class="token-manager-toolbar">
             <span class="token-manager-current">
-              <small>当前凭据</small>
+              <small>${poolSize > 1 ? "多账户模式" : "当前凭据"}</small>
               <strong>${escapeHtml(credentialLabel)}</strong>
             </span>
             <span class="token-manager-actions">
@@ -1137,6 +1291,8 @@ export function renderSettings(state) {
             </span>
           </div>
 
+          ${poolSize > 1 ? `<div class="token-pool-note">${icon("network")}<span>所有令牌会并行读取实例、账户余额、流量和活动；实例操作会自动路由到所属账户。标记为默认的令牌用于新建实例时的初始选择。</span></div>` : ""}
+
           <div class="token-list">
             ${
               tokens.length > 0
@@ -1148,7 +1304,7 @@ export function renderSettings(state) {
                           <span class="token-row-main">
                             <span class="token-row-title">
                               <strong>${escapeHtml(token.label)}</strong>
-                              ${token.active ? `<span class="token-active-badge">当前使用</span>` : ""}
+                              ${token.active ? `<span class="token-active-badge">默认</span>` : ""}
                             </span>
                             <span class="token-row-meta">
                               <span class="mono">${escapeHtml(token.masked)}</span>
@@ -1160,7 +1316,7 @@ export function renderSettings(state) {
                             ${
                               token.active
                                 ? ""
-                                : `<button type="button" class="text-button" data-action="activate-token" data-id="${escapeHtml(token.id)}">启用</button>`
+                                : `<button type="button" class="text-button" data-action="activate-token" data-id="${escapeHtml(token.id)}">设为默认</button>`
                             }
                             <button type="button" class="text-button" data-action="test-token" data-id="${escapeHtml(token.id)}">测试</button>
                             <button type="button" class="text-button text-button-danger" data-action="delete-token" data-id="${escapeHtml(token.id)}">删除</button>
@@ -1327,11 +1483,10 @@ export function renderDisconnected(state) {
   return `
     <section class="page page-disconnected">
       <div class="connect-card">
-        <div class="connect-glow" aria-hidden="true"></div>
         <span class="connect-mark">${icon("cloud")}</span>
-        <span class="eyebrow">LINODE / AKAMAI CLOUD</span>
-        <h1>把 Linode 装进一个页面</h1>
-        <p>添加个人 API 令牌，即可查看实例状态、部署新机器、掌握流量和执行日常运维操作。令牌加密保存在本机服务端。</p>
+        <span class="eyebrow">CLOUDVMCONTROLLER / LOCAL</span>
+        <h1>连接你的 Linode 账户</h1>
+        <p>添加个人 API 令牌，在一个控制面中查看实例、部署新机器、掌握流量并执行日常运维。令牌加密保存在本机服务端。</p>
         <div class="connect-actions">
           <button type="button" class="button button-primary" data-action="open-token">
             ${icon("key")} 连接 Linode 账户
@@ -1342,12 +1497,12 @@ export function renderDisconnected(state) {
         </div>
         ${state.sessionError ? `<div class="form-alert">${icon("alert")}<span>${escapeHtml(state.sessionError)}</span></div>` : ""}
         <div class="connect-features">
-          <span>${icon("server")} 实例开关机</span>
-          <span>${icon("activity")} 实时监控</span>
-          <span>${icon("plus")} 快速部署</span>
-          <span>${icon("shield")} 本地凭据</span>
+          <span><strong>01</strong> 实例开关机</span>
+          <span><strong>02</strong> 实时监控</span>
+          <span><strong>03</strong> 快速部署</span>
+          <span><strong>04</strong> 本地凭据</span>
         </div>
-        <p class="connect-foot">${icon("info")} 浏览器不会接触或持久化令牌；所有凭据由本地 Node 服务管理。</p>
+        <p class="connect-foot">${icon("shield")} 浏览器不会接触或持久化令牌；所有凭据由本地 Node 服务管理。</p>
       </div>
     </section>
   `;
@@ -1371,6 +1526,7 @@ function detailActionButton(state, instance, operation, label, iconName, style =
       class="button ${style || "button-secondary"} button-sm"
       data-action="instance-action"
       data-id="${escapeHtml(instance.id)}"
+      data-token-id="${escapeHtml(instance.tokenId || "")}"
       data-operation="${operation}"
       ${disabled ? "disabled" : ""}
     >
@@ -1411,7 +1567,7 @@ function renderDetailCharts(stats) {
       </div>
       ${renderLineChart([{ points: cpuPoints }], {
         height: 140,
-        colors: ["#50e3a4"],
+        colors: ["#4ade80"],
         maxValueOverride: cpuMax,
       })}
       <div class="chart-axis"><span>24 小时前</span><span>现在</span></div>
@@ -1432,7 +1588,7 @@ function renderDetailCharts(stats) {
         ],
         {
           height: 140,
-          colors: ["#50e3a4", "#69b9ff"],
+          colors: ["#4ade80", "#60a5fa"],
         },
       )}
       <div class="chart-axis"><span>24 小时前</span><span>现在</span></div>
@@ -1506,7 +1662,7 @@ export function renderDrawer(state) {
   } else if (detail.error) {
     body = `
       ${renderInlineError(detail.error)}
-      <button type="button" class="button button-secondary button-block" data-action="retry-detail" data-id="${escapeHtml(detail.id)}">
+      <button type="button" class="button button-secondary button-block" data-action="retry-detail" data-id="${escapeHtml(detail.id)}" data-token-id="${escapeHtml(detail.tokenId || "")}">
         ${icon("refresh")} 重新加载
       </button>
     `;
@@ -1583,6 +1739,7 @@ export function renderDrawer(state) {
           <h3>实例配置</h3>
         </div>
         <dl class="detail-meta-grid">
+          <div><dt>所属账户</dt><dd>${escapeHtml(instance.accountLabel || instance.tokenLabel || "—")}</dd></div>
           <div><dt>区域</dt><dd>${countryFlag(region?.country)} ${escapeHtml(region?.label || instance.region)}</dd></div>
           <div><dt>计算计划</dt><dd>${escapeHtml(typeDisplay(instance.type, plan))}</dd></div>
           <div><dt>系统镜像</dt><dd>${escapeHtml(imageDisplay(instance.image, state.catalog?.images || []))}</dd></div>
@@ -1632,7 +1789,7 @@ export function renderDrawer(state) {
           <strong>删除此实例</strong>
           <p>磁盘、配置和公网地址将永久删除。此操作无法撤销。</p>
         </div>
-        <button type="button" class="button button-danger-ghost button-sm" data-action="open-delete" data-id="${escapeHtml(instance.id)}">
+        <button type="button" class="button button-danger-ghost button-sm" data-action="open-delete" data-id="${escapeHtml(instance.id)}" data-token-id="${escapeHtml(instance.tokenId || "")}">
           ${icon("trash")} 删除实例
         </button>
       </section>
