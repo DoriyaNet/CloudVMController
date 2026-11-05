@@ -5198,3 +5198,2267 @@ code {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Readability and detail-panel refinement */
+
+:root {
+  --topbar: 60px;
+}
+
+.page {
+  padding: 34px 40px 72px;
+}
+
+.page-header {
+  margin-bottom: 26px;
+}
+
+.page-header h1 {
+  margin-top: 9px;
+  font-size: 30px;
+  line-height: 1.12;
+}
+
+.page-header p {
+  max-width: 820px;
+  color: var(--text-2);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.page-eyebrow,
+.eyebrow {
+  font-size: 9.5px;
+}
+
+.button {
+  height: 34px;
+  padding: 0 13px;
+  font-size: 12.5px;
+}
+
+.button .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.button-sm {
+  height: 30px;
+  padding: 0 10px;
+  font-size: 11.5px;
+}
+
+.text-link {
+  font-size: 12px;
+}
+
+.text-button {
+  font-size: 11.5px;
+}
+
+.brand-name {
+  font-size: 15px;
+}
+
+.brand-sub {
+  font-size: 8.5px;
+}
+
+.workspace-copy strong {
+  font-size: 12.5px;
+}
+
+.workspace-copy small {
+  font-size: 10px;
+}
+
+.nav-label {
+  font-size: 9.5px;
+}
+
+.nav-item {
+  height: 37px;
+  font-size: 13px;
+}
+
+.nav-icon .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.nav-count {
+  min-width: 21px;
+  font-size: 9px;
+}
+
+.sidebar-account-copy strong {
+  font-size: 11.5px;
+}
+
+.sidebar-account-copy span {
+  font-size: 10px;
+}
+
+.sidebar-meta {
+  font-size: 8.5px;
+}
+
+.topbar {
+  padding: 0 24px;
+}
+
+.breadcrumb {
+  font-size: 12.5px;
+}
+
+.breadcrumb-root {
+  font-size: 11px;
+}
+
+.command-search {
+  width: 252px;
+  height: 34px;
+  font-size: 12px;
+}
+
+.command-search .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.icon-button {
+  width: 32px;
+  height: 32px;
+}
+
+.connection-pill {
+  height: 28px;
+  font-size: 10px;
+}
+
+.avatar-button {
+  width: 32px;
+  height: 32px;
+  font-size: 10px;
+}
+
+.system-strip {
+  height: 38px;
+  gap: 16px;
+  padding: 0 13px;
+  font-size: 10.5px;
+}
+
+.stat-card {
+  min-height: 148px;
+  padding: 20px 22px 18px;
+}
+
+.stat-label {
+  font-size: 12.5px;
+}
+
+.stat-icon {
+  width: 28px;
+  height: 28px;
+}
+
+.stat-icon .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.stat-value {
+  margin-top: 18px;
+  font-size: 32px;
+}
+
+.stat-value small {
+  font-size: 14px;
+}
+
+.stat-foot {
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.panel-heading {
+  padding: 17px 20px 15px;
+}
+
+.panel-kicker {
+  font-size: 9.5px;
+}
+
+.panel-heading h2,
+.settings-panel-heading h2 {
+  font-size: 15.5px;
+}
+
+.panel-note {
+  font-size: 10.5px;
+}
+
+.account-pool {
+  padding: 17px 19px;
+}
+
+.account-pool-heading h2 {
+  font-size: 14px;
+}
+
+.account-pool-item {
+  padding: 11px 12px;
+}
+
+.account-pool-item strong {
+  font-size: 11.5px;
+}
+
+.account-pool-item small {
+  font-size: 10px;
+}
+
+.compact-instance {
+  min-height: 62px;
+  padding: 11px 20px;
+}
+
+.compact-instance-copy strong {
+  font-size: 13px;
+}
+
+.compact-instance-copy small {
+  font-size: 10.5px;
+}
+
+.compact-instance-ip {
+  font-size: 11px;
+}
+
+.status-badge {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.status-badge.is-compact {
+  height: 22px;
+  padding: 0 7px;
+  font-size: 10px;
+}
+
+.traffic-label {
+  font-size: 10px;
+}
+
+.traffic-copy strong {
+  font-size: 28px;
+}
+
+.traffic-quota {
+  font-size: 11px;
+}
+
+.traffic-meta {
+  padding: 12px 20px;
+  font-size: 10.5px;
+}
+
+.event-item {
+  padding: 12px 20px;
+}
+
+.event-icon {
+  width: 28px;
+  height: 28px;
+}
+
+.event-icon .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.event-title-row strong {
+  font-size: 12.5px;
+}
+
+.event-state {
+  font-size: 9px;
+}
+
+.event-meta {
+  font-size: 10.5px;
+}
+
+.region-bars {
+  gap: 13px;
+  padding: 17px 20px;
+}
+
+.region-bar-label {
+  font-size: 11.5px;
+}
+
+.region-bar-label strong {
+  font-size: 10.5px;
+}
+
+.region-cta {
+  padding: 14px 20px;
+}
+
+.region-cta strong {
+  font-size: 12px;
+}
+
+.region-cta small {
+  font-size: 10px;
+}
+
+.empty-state h3 {
+  font-size: 14.5px;
+}
+
+.empty-state p {
+  font-size: 12px;
+}
+
+.instance-toolbar {
+  margin-bottom: 13px;
+}
+
+.segmented-filter {
+  height: 34px;
+}
+
+.segment {
+  padding: 0 11px;
+  font-size: 12px;
+}
+
+.segment span {
+  font-size: 9.5px;
+}
+
+.search-field {
+  width: 274px;
+  height: 34px;
+}
+
+.search-field input {
+  font-size: 12.5px;
+}
+
+.select-field-compact {
+  height: 34px;
+}
+
+.select-field select {
+  font-size: 12px;
+}
+
+.list-summary {
+  margin-bottom: 11px;
+  font-size: 10.5px;
+}
+
+.instances-table-head {
+  height: 38px;
+  padding: 0 18px;
+  font-size: 10.5px;
+}
+
+.instance-row {
+  min-height: 76px;
+  padding: 10px 18px;
+}
+
+.server-tile {
+  width: 32px;
+  height: 32px;
+}
+
+.server-tile .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.instance-name {
+  font-size: 13.5px;
+}
+
+.instance-row-meta,
+.instance-row-meta .mono {
+  font-size: 10.5px;
+}
+
+.ip-stack > .mono {
+  font-size: 11.5px;
+}
+
+.spec-line {
+  font-size: 12px;
+}
+
+.region-copy strong {
+  font-size: 11.5px;
+}
+
+.region-copy small {
+  font-size: 9.5px;
+}
+
+.instance-price {
+  font-size: 11.5px;
+}
+
+.power-button,
+.row-open {
+  width: 29px;
+  height: 29px;
+}
+
+.power-button .icon,
+.row-open .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.form-card {
+  padding: 23px 24px;
+}
+
+.form-card-heading {
+  gap: 13px;
+  padding-bottom: 17px;
+}
+
+.form-card-heading h2 {
+  font-size: 16px;
+}
+
+.form-card-heading p {
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.form-step {
+  width: 30px;
+  height: 24px;
+  font-size: 9.5px;
+}
+
+.form-field {
+  gap: 7px;
+  margin-top: 19px;
+}
+
+.field-label {
+  font-size: 12px;
+}
+
+.field-label em {
+  font-size: 10px;
+}
+
+.field-hint {
+  font-size: 10.5px;
+}
+
+.form-field input,
+.form-field textarea,
+.form-field select {
+  font-size: 13px;
+}
+
+.form-field input,
+.form-field select,
+.select-wrap select,
+.input-action-wrap input {
+  height: 38px;
+}
+
+.select-wrap select {
+  padding-right: 30px;
+  padding-left: 32px;
+}
+
+.select-leading {
+  left: 11px;
+}
+
+.input-leading {
+  left: 11px;
+}
+
+.input-action-wrap input {
+  padding-left: 32px;
+}
+
+.input-action {
+  height: 32px;
+}
+
+.plan-inline-preview {
+  padding: 13px 14px;
+}
+
+.plan-preview-icon {
+  width: 30px;
+  height: 30px;
+}
+
+.plan-preview-copy strong {
+  font-size: 11.5px;
+}
+
+.plan-preview-copy small {
+  font-size: 10px;
+}
+
+.plan-preview-price {
+  font-size: 11.5px;
+}
+
+.advanced-panel summary {
+  padding: 17px 24px;
+}
+
+.advanced-summary-copy strong {
+  font-size: 12.5px;
+}
+
+.advanced-summary-copy small {
+  font-size: 10.5px;
+}
+
+.advanced-content {
+  padding: 3px 24px 24px;
+}
+
+.switch-row strong {
+  font-size: 12px;
+}
+
+.switch-row small {
+  font-size: 10.5px;
+}
+
+.create-summary {
+  padding: 20px;
+}
+
+.summary-heading {
+  font-size: 13px;
+}
+
+.summary-region strong {
+  font-size: 13px;
+}
+
+.summary-region small {
+  font-size: 10.5px;
+}
+
+.summary-list dt,
+.summary-list dd {
+  font-size: 11.5px;
+}
+
+.cost-value {
+  font-size: 28px;
+}
+
+.summary-note {
+  font-size: 9.5px;
+}
+
+.settings-grid {
+  gap: 16px;
+}
+
+.settings-panel {
+  padding: 22px;
+}
+
+.settings-icon {
+  width: 34px;
+  height: 34px;
+}
+
+.token-manager-toolbar {
+  padding: 12px 13px;
+}
+
+.token-manager-current small {
+  font-size: 9.5px;
+}
+
+.token-manager-current strong {
+  font-size: 12px;
+}
+
+.token-row {
+  gap: 12px;
+  padding: 13px 14px;
+}
+
+.token-row-icon {
+  width: 32px;
+  height: 32px;
+}
+
+.token-row-title strong {
+  font-size: 12.5px;
+}
+
+.token-row-meta,
+.token-row-meta .mono {
+  font-size: 10.5px;
+}
+
+.token-pool-note,
+.env-token-note {
+  font-size: 10.5px;
+}
+
+.settings-note {
+  font-size: 10.5px;
+}
+
+.settings-list dt,
+.settings-list dd {
+  font-size: 11.5px;
+}
+
+.settings-list > div {
+  padding: 11px 0;
+}
+
+.security-list li {
+  font-size: 11.5px;
+}
+
+.resource-link {
+  padding: 12px 0;
+}
+
+.resource-link strong {
+  font-size: 12px;
+}
+
+.resource-link small {
+  font-size: 10.5px;
+}
+
+.connect-card,
+.failure-card {
+  width: min(100%, 560px);
+  padding: 38px;
+}
+
+.connect-card h1,
+.failure-card h1 {
+  font-size: 28px;
+}
+
+.connect-card > p,
+.failure-card > p {
+  font-size: 13.5px;
+}
+
+.connect-features span {
+  min-height: 44px;
+  font-size: 11.5px;
+}
+
+.connect-foot {
+  font-size: 10.5px !important;
+}
+
+/* Detail drawer: wider and roomier */
+
+.drawer {
+  width: min(760px, calc(100vw - 24px));
+}
+
+.drawer-header {
+  min-height: 72px;
+  padding: 15px 24px;
+}
+
+.drawer-title-icon {
+  width: 34px;
+  height: 34px;
+}
+
+.drawer-title-wrap h2 {
+  max-width: 600px;
+  font-size: 18px;
+}
+
+.drawer-title-wrap .panel-kicker {
+  font-size: 9.5px;
+}
+
+.drawer-body {
+  padding: 0 28px 40px;
+}
+
+.drawer-status-row {
+  padding: 22px 0 16px;
+}
+
+.drawer-instance-id {
+  font-size: 9.5px;
+}
+
+.drawer-actions {
+  gap: 8px;
+  padding: 16px 0;
+}
+
+.drawer-transition {
+  font-size: 10.5px;
+}
+
+.drawer-section {
+  padding: 22px 0;
+}
+
+.drawer-section-heading {
+  margin-bottom: 14px;
+}
+
+.drawer-section-heading h3 {
+  font-size: 14px;
+}
+
+.address-row {
+  min-height: 44px;
+  padding: 9px 12px;
+}
+
+.address-type {
+  width: 42px;
+  font-size: 9.5px;
+}
+
+.address-row > .mono {
+  font-size: 11.5px;
+}
+
+.detail-meta-grid > div {
+  padding: 13px 14px;
+}
+
+.detail-meta-grid dt {
+  font-size: 10px;
+}
+
+.detail-meta-grid dd {
+  font-size: 12px;
+}
+
+.detail-spec-row > span {
+  gap: 3px;
+  padding: 13px;
+}
+
+.detail-spec-row .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.detail-spec-row strong {
+  font-size: 12px;
+}
+
+.detail-spec-row small {
+  font-size: 9px;
+}
+
+.metric-grid {
+  margin-bottom: 12px;
+}
+
+.metric-card {
+  gap: 9px;
+  padding: 12px;
+}
+
+.metric-icon {
+  width: 25px;
+  height: 25px;
+}
+
+.metric-copy small {
+  font-size: 9px;
+}
+
+.metric-copy strong {
+  font-size: 13px;
+}
+
+.metric-copy > span {
+  font-size: 8.5px;
+}
+
+.chart-card {
+  padding: 14px;
+}
+
+.chart-heading h3 {
+  font-size: 12.5px;
+}
+
+.line-chart {
+  height: 178px;
+}
+
+.chart-axis {
+  font-size: 8.5px;
+}
+
+.backup-status {
+  gap: 11px;
+  padding: 13px;
+}
+
+.backup-icon {
+  width: 29px;
+  height: 29px;
+}
+
+.backup-copy strong {
+  font-size: 11.5px;
+}
+
+.backup-copy small {
+  font-size: 10px;
+}
+
+.backup-schedule {
+  margin-top: 9px;
+  font-size: 9.5px;
+}
+
+.danger-zone strong {
+  font-size: 11.5px;
+}
+
+.danger-zone p {
+  font-size: 10px;
+}
+
+.modal-card {
+  width: min(100%, 540px);
+  padding: 32px;
+}
+
+.modal-card h2 {
+  font-size: 23px;
+}
+
+.modal-card > p {
+  font-size: 12.5px;
+}
+
+.scope-list > span {
+  font-size: 9px;
+}
+
+.modal-foot {
+  font-size: 9.5px;
+}
+
+.toast-message {
+  font-size: 10.5px;
+}
+
+/* Custom select */
+
+.has-custom-select {
+  position: relative;
+  overflow: visible;
+}
+
+.has-custom-select > .icon:last-child {
+  display: none;
+}
+
+.custom-select-native {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+.custom-select-trigger {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 0 30px 0 31px;
+  border: 0;
+  border-radius: inherit;
+  outline: 0;
+  color: var(--text);
+  background: transparent;
+  font-size: 13px;
+  text-align: left;
+}
+
+.select-field .custom-select-trigger {
+  padding: 0 28px 0 29px;
+  font-size: 12px;
+}
+
+.custom-select-trigger:hover {
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.custom-select-trigger:focus-visible {
+  outline: 1px solid var(--white);
+  outline-offset: 1px;
+}
+
+.custom-select-trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.custom-select-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.custom-select-chevron {
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  color: var(--text-4);
+  transition: transform 140ms ease;
+}
+
+.custom-select-chevron svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.custom-select-trigger[aria-expanded="true"] .custom-select-chevron {
+  color: var(--text-2);
+  transform: rotate(180deg);
+}
+
+.has-custom-select:has(.custom-select-trigger[aria-expanded="true"]) {
+  border-color: var(--line-bright);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.custom-select-menu {
+  position: fixed;
+  z-index: 140;
+  display: flex;
+  max-height: min(440px, calc(100vh - 24px));
+  min-width: 260px;
+  max-width: min(480px, calc(100vw - 24px));
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line-bright);
+  border-radius: var(--radius);
+  background: #080808;
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.78);
+  animation: custom-menu-in 120ms ease;
+}
+
+.custom-select-menu.is-above {
+  transform-origin: bottom center;
+}
+
+.custom-select-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+  background: #0a0a0a;
+}
+
+.custom-select-search svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: var(--text-4);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
+.custom-select-search input {
+  width: 100%;
+  height: 42px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  color: var(--text);
+  background: transparent;
+  font-size: 12.5px;
+}
+
+.custom-select-search input::placeholder {
+  color: var(--text-4);
+}
+
+.custom-select-options {
+  max-height: inherit;
+  padding: 5px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.custom-select-group + .custom-select-group {
+  margin-top: 3px;
+}
+
+.custom-select-group-label {
+  position: sticky;
+  top: -5px;
+  z-index: 1;
+  padding: 9px 9px 6px;
+  color: var(--text-4);
+  background: #080808;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.custom-select-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 17px;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 9px;
+  border: 0;
+  border-radius: 2px;
+  color: var(--text-2);
+  background: transparent;
+  text-align: left;
+}
+
+.custom-select-option:hover,
+.custom-select-option:focus-visible {
+  outline: 0;
+  color: var(--text);
+  background: #161616;
+}
+
+.custom-select-option.is-selected {
+  color: var(--text);
+  background: #1a1a1a;
+  box-shadow: inset 2px 0 0 var(--white);
+}
+
+.custom-select-option.is-disabled {
+  color: var(--text-4);
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.custom-select-option.is-disabled:hover {
+  color: var(--text-4);
+  background: transparent;
+}
+
+.custom-select-option-main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.custom-select-option-title {
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.custom-select-option-detail {
+  overflow: hidden;
+  color: var(--text-4);
+  font-size: 10.5px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.custom-select-option-side {
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.custom-select-check {
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  color: transparent;
+}
+
+.custom-select-check svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.custom-select-option.is-selected .custom-select-check {
+  color: var(--white);
+}
+
+.custom-select-empty {
+  padding: 22px 12px;
+  color: var(--text-4);
+  font-size: 11px;
+  text-align: center;
+}
+
+@keyframes custom-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (min-width: 1600px) {
+  .drawer {
+    width: 820px;
+  }
+}
+
+@media (max-width: 900px) {
+  .page {
+    padding: 28px 22px 60px;
+  }
+
+  .drawer {
+    width: min(760px, calc(100vw - 12px));
+  }
+}
+
+@media (max-width: 760px) {
+  .page {
+    padding: 24px 16px 52px;
+  }
+
+  .topbar {
+    padding: 0 14px;
+  }
+
+  .page-header h1 {
+    font-size: 26px;
+  }
+
+  .page-header p {
+    font-size: 13px;
+  }
+
+  .command-search {
+    width: 34px;
+  }
+
+  .stat-card {
+    min-height: 132px;
+  }
+
+  .stat-value {
+    font-size: 30px;
+  }
+
+  .compact-instance {
+    padding: 10px 16px;
+  }
+
+  .drawer {
+    width: 100vw;
+  }
+
+  .drawer-header {
+    padding: 13px 16px;
+  }
+
+  .drawer-body {
+    padding: 0 18px 30px;
+  }
+
+  .drawer-section {
+    padding: 19px 0;
+  }
+
+  .modal-card {
+    padding: 24px;
+  }
+
+  .custom-select-menu {
+    max-width: calc(100vw - 20px);
+  }
+}
+
+/* Final readability scale */
+
+:root {
+  --text-2: #b8b8b8;
+  --text-3: #949494;
+  --text-4: #747474;
+  --line: #2a2a2a;
+  --line-strong: #4a4a4a;
+  --line-bright: #666666;
+  --bg-subtle: #070707;
+  --surface: #0b0b0b;
+  --surface-2: #131313;
+  --surface-3: #1b1b1b;
+  --hover: #181818;
+}
+
+.panel-kicker,
+.page-eyebrow,
+.eyebrow {
+  font-size: 10.5px;
+}
+
+.panel-note {
+  font-size: 11.5px;
+}
+
+.button {
+  height: 38px;
+  padding: 0 15px;
+  font-size: 13.5px;
+}
+
+.button-sm {
+  height: 34px;
+  padding: 0 12px;
+  font-size: 12.5px;
+}
+
+.text-link {
+  font-size: 12.5px;
+}
+
+.text-button {
+  min-height: 32px;
+  font-size: 12.5px;
+}
+
+.icon-button {
+  width: 36px;
+  height: 36px;
+}
+
+.avatar-button {
+  width: 36px;
+  height: 36px;
+  font-size: 11px;
+}
+
+.brand-sub {
+  font-size: 9.5px;
+}
+
+.workspace-copy strong {
+  font-size: 13px;
+}
+
+.workspace-copy small {
+  font-size: 11px;
+}
+
+.nav-label {
+  font-size: 10.5px;
+}
+
+.nav-item {
+  height: 40px;
+  font-size: 13.5px;
+}
+
+.nav-count {
+  font-size: 10px;
+}
+
+.sidebar-account-copy strong {
+  font-size: 12.5px;
+}
+
+.sidebar-account-copy span {
+  font-size: 11px;
+}
+
+.sidebar-meta {
+  font-size: 9.5px;
+}
+
+.breadcrumb {
+  font-size: 13px;
+}
+
+.breadcrumb-root {
+  font-size: 12px;
+}
+
+.command-search {
+  width: 270px;
+  height: 38px;
+  font-size: 13px;
+}
+
+.connection-pill {
+  height: 30px;
+  font-size: 11px;
+}
+
+.system-strip {
+  height: 42px;
+  font-size: 12px;
+}
+
+.stat-card {
+  min-height: 154px;
+}
+
+.stat-label {
+  font-size: 13px;
+}
+
+.stat-foot {
+  font-size: 12.5px;
+}
+
+.panel-heading h2,
+.settings-panel-heading h2 {
+  font-size: 16px;
+}
+
+.account-pool-item strong {
+  font-size: 13px;
+}
+
+.account-pool-item small {
+  font-size: 11.5px;
+}
+
+.compact-instance-copy strong {
+  font-size: 13.5px;
+}
+
+.compact-instance-copy small {
+  font-size: 11.5px;
+}
+
+.compact-instance-ip {
+  font-size: 12px;
+}
+
+.status-badge {
+  height: 26px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+.status-badge.is-compact {
+  height: 23px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.status-indicator {
+  width: 6px;
+  height: 6px;
+}
+
+.traffic-label {
+  font-size: 10.5px;
+}
+
+.traffic-quota {
+  font-size: 11.5px;
+}
+
+.quota-scale {
+  font-size: 10px;
+}
+
+.traffic-meta {
+  font-size: 12px;
+}
+
+.event-title-row strong {
+  font-size: 13.5px;
+}
+
+.event-state {
+  font-size: 10.5px;
+}
+
+.event-meta {
+  font-size: 11.5px;
+}
+
+.region-bar-label {
+  font-size: 13px;
+}
+
+.region-bar-label strong {
+  font-size: 12px;
+}
+
+.region-cta strong {
+  font-size: 13px;
+}
+
+.region-cta small {
+  font-size: 11.5px;
+}
+
+.empty-state p {
+  font-size: 13px;
+}
+
+.segmented-filter {
+  height: 38px;
+}
+
+.segment {
+  padding: 0 13px;
+  font-size: 13px;
+}
+
+.segment span {
+  font-size: 11px;
+}
+
+.search-field {
+  height: 38px;
+}
+
+.search-field input {
+  font-size: 13.5px;
+}
+
+.select-field,
+.select-field-compact {
+  height: 40px;
+}
+
+.select-field select {
+  font-size: 13px;
+}
+
+.list-summary {
+  font-size: 11.5px;
+}
+
+.instances-table-head {
+  height: 42px;
+  font-size: 11.5px;
+}
+
+.instance-row {
+  min-height: 84px;
+}
+
+.instance-name {
+  font-size: 14px;
+}
+
+.instance-row-meta,
+.instance-row-meta .mono {
+  font-size: 11.5px;
+}
+
+.ip-stack > .mono {
+  font-size: 12.5px;
+}
+
+.spec-line {
+  font-size: 13px;
+}
+
+.region-copy strong {
+  font-size: 12.5px;
+}
+
+.region-copy small {
+  font-size: 10.5px;
+}
+
+.instance-price {
+  font-size: 12.5px;
+}
+
+.instance-cost-cell > small {
+  font-size: 10px;
+}
+
+.power-button,
+.row-open {
+  width: 34px;
+  height: 34px;
+}
+
+.power-button .icon,
+.row-open .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.transition-label {
+  font-size: 10.5px;
+}
+
+.tag {
+  height: 24px;
+  font-size: 10.5px;
+}
+
+.form-card-heading h2 {
+  font-size: 16.5px;
+}
+
+.form-card-heading p {
+  font-size: 13px;
+}
+
+.form-step {
+  width: 32px;
+  height: 28px;
+  font-size: 11px;
+}
+
+.field-label {
+  font-size: 13px;
+}
+
+.field-label em {
+  font-size: 11px;
+}
+
+.field-hint {
+  font-size: 11.5px;
+}
+
+.form-field input,
+.form-field textarea,
+.form-field select {
+  font-size: 14px;
+}
+
+.form-field input,
+.form-field select,
+.select-wrap select,
+.input-action-wrap input {
+  height: 42px;
+}
+
+.form-field textarea {
+  min-height: 112px;
+}
+
+.input-action {
+  height: 36px;
+}
+
+.password-meter small {
+  font-size: 11px;
+}
+
+.plan-preview-copy strong {
+  font-size: 13px;
+}
+
+.plan-preview-copy small {
+  font-size: 11.5px;
+}
+
+.plan-preview-price {
+  font-size: 12.5px;
+}
+
+.advanced-summary-copy strong {
+  font-size: 13.5px;
+}
+
+.advanced-summary-copy small {
+  font-size: 11.5px;
+}
+
+.switch-row strong {
+  font-size: 13.5px;
+}
+
+.switch-row small {
+  font-size: 11.5px;
+}
+
+.switch-control {
+  width: 40px;
+  height: 22px;
+  border-radius: 11px;
+}
+
+.switch-control::after {
+  top: 4px;
+  left: 4px;
+  width: 12px;
+  height: 12px;
+}
+
+.switch-row input:checked + .switch-control::after {
+  transform: translateX(18px);
+}
+
+.simple-checkbox {
+  font-size: 12.5px;
+}
+
+.simple-checkbox > span:first-of-type {
+  width: 19px;
+  height: 19px;
+}
+
+.summary-heading {
+  font-size: 13.5px;
+}
+
+.summary-list dt,
+.summary-list dd {
+  font-size: 12.5px;
+}
+
+.summary-note {
+  font-size: 11px;
+}
+
+.settings-panel {
+  padding: 24px;
+}
+
+.token-manager-current small {
+  font-size: 11px;
+}
+
+.token-manager-current strong {
+  font-size: 13px;
+}
+
+.token-row-title strong {
+  font-size: 13.5px;
+}
+
+.token-row-meta,
+.token-row-meta .mono {
+  font-size: 12px;
+}
+
+.token-active-badge {
+  font-size: 9.5px;
+}
+
+.token-pool-note,
+.env-token-note,
+.settings-note {
+  font-size: 12px;
+}
+
+.settings-list dt,
+.settings-list dd,
+.security-list li {
+  font-size: 13px;
+}
+
+.resource-link strong {
+  font-size: 13px;
+}
+
+.resource-link small {
+  font-size: 11.5px;
+}
+
+.preset-button {
+  height: 32px;
+  font-size: 11px;
+}
+
+.connect-card > p,
+.failure-card > p {
+  font-size: 14px;
+}
+
+.connect-features span {
+  font-size: 12.5px;
+}
+
+.connect-foot {
+  font-size: 11px !important;
+}
+
+.modal-card {
+  width: min(100%, 560px);
+}
+
+.modal-card > p {
+  font-size: 13.5px;
+}
+
+.scope-title {
+  font-size: 11px;
+}
+
+.scope-list > span {
+  font-size: 11.5px;
+}
+
+.scope-list {
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+
+.scope-list > span {
+  padding: 8px 10px;
+  color: var(--text-2);
+  background: var(--surface-2);
+}
+
+.scope-list strong {
+  padding: 1px 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 1px;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 9.5px;
+  font-weight: 500;
+}
+
+.modal-foot {
+  font-size: 11px;
+}
+
+.token-submit {
+  height: 42px;
+}
+
+.modal-close {
+  width: 38px;
+  height: 38px;
+}
+
+.toast-message {
+  font-size: 12px;
+}
+
+.toast-close {
+  width: 30px;
+  height: 30px;
+}
+
+/* Larger detail drawer */
+
+.drawer {
+  width: min(960px, 68vw);
+}
+
+.drawer-header {
+  min-height: 80px;
+  padding: 16px 28px;
+}
+
+.drawer-title-wrap h2 {
+  max-width: 780px;
+  font-size: 20px;
+}
+
+.drawer-body {
+  padding: 24px 32px 40px;
+}
+
+.drawer-status-row {
+  padding: 20px 0 16px;
+}
+
+.drawer-section {
+  padding: 24px 0;
+}
+
+.drawer-section-heading {
+  margin-bottom: 15px;
+}
+
+.drawer-section-heading h3 {
+  font-size: 16px;
+}
+
+.address-row {
+  min-height: 48px;
+  padding: 10px 14px;
+}
+
+.address-type {
+  width: 46px;
+  font-size: 10.5px;
+}
+
+.address-row > .mono {
+  font-size: 12px;
+}
+
+.detail-meta-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.detail-meta-grid > div {
+  padding: 14px 16px;
+}
+
+.detail-meta-grid dt {
+  margin-bottom: 3px;
+  font-size: 11.5px;
+}
+
+.detail-meta-grid dd {
+  overflow: visible;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.detail-spec-row > span {
+  padding: 14px;
+}
+
+.detail-spec-row .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.detail-spec-row strong {
+  font-size: 14px;
+}
+
+.detail-spec-row small {
+  font-size: 10.5px;
+}
+
+.metric-card {
+  gap: 10px;
+  padding: 14px;
+}
+
+.metric-icon {
+  width: 28px;
+  height: 28px;
+}
+
+.metric-copy small {
+  font-size: 10.5px;
+}
+
+.metric-copy strong {
+  font-size: 15px;
+}
+
+.metric-copy > span {
+  font-size: 10px;
+}
+
+.drawer-body > .drawer-section:nth-of-type(3) {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 20px;
+}
+
+.drawer-body > .drawer-section:nth-of-type(3) > .drawer-section-heading,
+.drawer-body > .drawer-section:nth-of-type(3) > .metric-grid {
+  grid-column: 1 / -1;
+}
+
+.drawer-body > .drawer-section:nth-of-type(3) > .drawer-section-heading {
+  margin-bottom: 0;
+}
+
+.drawer-body > .drawer-section:nth-of-type(3) > .metric-grid {
+  margin-bottom: 0;
+}
+
+.drawer-body > .drawer-section:nth-of-type(3) > .chart-card {
+  margin-top: 0;
+  padding: 16px;
+}
+
+.chart-heading h3 {
+  font-size: 13px;
+}
+
+.chart-legend {
+  font-size: 10px;
+}
+
+.line-chart {
+  height: 210px;
+}
+
+.chart-axis {
+  font-size: 9.5px;
+}
+
+.chart-grid line {
+  stroke: #303030;
+}
+
+.chart-line {
+  stroke-width: 2;
+}
+
+.backup-copy strong {
+  font-size: 12.5px;
+}
+
+.backup-copy small {
+  font-size: 11.5px;
+}
+
+.backup-schedule {
+  font-size: 10.5px;
+}
+
+.danger-zone strong {
+  font-size: 12.5px;
+}
+
+.danger-zone p {
+  font-size: 11.5px;
+}
+
+/* Custom select sizing and correct search markup */
+
+.select-field.has-custom-select {
+  min-width: 172px;
+}
+
+.filter-controls .select-field.has-custom-select {
+  width: 172px;
+  flex: 0 0 auto;
+}
+
+.custom-select-menu {
+  max-width: min(520px, calc(100vw - 24px));
+}
+
+.custom-select-search-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 46px;
+  padding: 0 13px;
+  border-bottom: 1px solid var(--line);
+  background: #0d0d0d;
+}
+
+.custom-select-search {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: auto;
+  height: auto;
+  min-height: 46px;
+  padding: 0 13px;
+  border-bottom: 1px solid var(--line);
+  background: #0d0d0d;
+}
+
+.custom-select-search-icon {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: var(--text-3);
+}
+
+.custom-select-search-icon svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+.custom-select-search-input {
+  width: 100%;
+  height: 44px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-bottom: 0;
+  outline: 0;
+  color: var(--text);
+  background: transparent;
+  font-size: 13.5px;
+}
+
+.custom-select-search-input::placeholder {
+  color: var(--text-4);
+}
+
+.custom-select-options {
+  min-height: 0;
+  max-height: none;
+  flex: 1 1 auto;
+  padding: 5px;
+}
+
+.custom-select-group-label {
+  padding: 10px 10px 7px;
+  font-size: 9.5px;
+}
+
+.custom-select-option {
+  min-height: 44px;
+  padding: 9px 10px;
+}
+
+.custom-select-option-title {
+  font-size: 13.5px;
+}
+
+.custom-select-option-detail {
+  font-size: 11.5px;
+}
+
+.custom-select-option-side {
+  font-size: 11.5px;
+}
+
+.custom-select-empty {
+  font-size: 12px;
+}
+
+.detail-meta-grid > div:last-child:nth-child(3n + 1) {
+  grid-column: 1 / -1;
+}
+
+/* Responsive corrections after the readability pass */
+
+@media (max-width: 1279px) and (min-width: 761px) {
+  .drawer {
+    width: min(880px, 84vw);
+  }
+}
+
+@media (max-width: 1180px) {
+  .instance-toolbar {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .filter-controls {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
+
+@media (max-width: 900px) {
+  .page {
+    padding: 28px 22px 60px;
+  }
+
+  .drawer {
+    width: min(880px, calc(100vw - 12px));
+  }
+}
+
+@media (max-width: 760px) {
+  .page {
+    padding: 24px 16px 52px;
+  }
+
+  .page-header h1 {
+    font-size: 27px;
+  }
+
+  .page-header p {
+    font-size: 13.5px;
+  }
+
+  .command-search {
+    width: 36px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .command-search > span:nth-child(2),
+  .command-search kbd {
+    display: none;
+  }
+
+  .connection-label {
+    display: none;
+  }
+
+  .system-strip {
+    gap: 10px;
+  }
+
+  .system-strip > span:nth-child(4),
+  .system-strip > span:nth-child(5),
+  .system-date {
+    display: none;
+  }
+
+  .segmented-filter {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+    height: auto;
+    overflow: hidden;
+  }
+
+  .segment {
+    height: 40px;
+    justify-content: flex-start;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .segment:nth-child(odd) {
+    border-right: 1px solid var(--line);
+  }
+
+  .segment:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
+
+  .filter-controls {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .search-field {
+    width: 100%;
+  }
+
+  .filter-controls .select-field.has-custom-select {
+    width: auto;
+    flex: 1 1 120px;
+    min-width: 120px;
+  }
+
+  .instance-row {
+    min-height: 0;
+  }
+
+  .form-card {
+    padding: 18px;
+  }
+
+  .advanced-panel summary {
+    padding: 15px 18px;
+  }
+
+  .advanced-content {
+    padding: 3px 18px 18px;
+  }
+
+  .settings-panel {
+    padding: 18px;
+  }
+
+  .drawer {
+    width: 100vw;
+  }
+
+  .drawer-header {
+    min-height: 70px;
+    padding: 13px 16px;
+  }
+
+  .drawer-title-wrap h2 {
+    font-size: 18px;
+  }
+
+  .drawer-body {
+    padding: 18px 16px 32px;
+  }
+
+  .drawer-section {
+    padding: 20px 0;
+  }
+
+  .detail-meta-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .detail-meta-grid > div:last-child:nth-child(3n + 1) {
+    grid-column: 1;
+  }
+
+  .detail-spec-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .drawer-body > .drawer-section:nth-of-type(3) {
+    grid-template-columns: 1fr;
+  }
+
+  .line-chart {
+    height: 190px;
+  }
+
+  .modal-card {
+    padding: 24px;
+  }
+
+  .custom-select-menu {
+    max-width: calc(100vw - 20px);
+  }
+}

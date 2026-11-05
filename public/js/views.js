@@ -1566,7 +1566,7 @@ function renderDetailCharts(stats) {
         <span class="chart-legend"><i class="legend-dot legend-green"></i>24 小时</span>
       </div>
       ${renderLineChart([{ points: cpuPoints }], {
-        height: 140,
+        height: 210,
         colors: ["#4ade80"],
         maxValueOverride: cpuMax,
       })}
@@ -1587,7 +1587,7 @@ function renderDetailCharts(stats) {
           { points: netOutPoints },
         ],
         {
-          height: 140,
+          height: 210,
           colors: ["#4ade80", "#60a5fa"],
         },
       )}

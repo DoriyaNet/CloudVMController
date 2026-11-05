@@ -1,5 +1,6 @@
 import { ApiError, createApi } from "./api.js";
 import { icon, mountIcons } from "./icons.js";
+import { enhanceSelects } from "./select.js";
 import {
   copyToClipboard,
   debounce,
@@ -303,6 +304,11 @@ function syncBodyLock() {
   );
 }
 
+function paintView(html) {
+  elements.viewRoot.innerHTML = html;
+  enhanceSelects(elements.viewRoot);
+}
+
 function renderView() {
   updateShell();
 
@@ -311,12 +317,12 @@ function renderView() {
   }
 
   if (state.view === "settings") {
-    elements.viewRoot.innerHTML = renderSettings(state);
+    paintView(renderSettings(state));
     return;
   }
 
   if (!hasCredentials()) {
-    elements.viewRoot.innerHTML = renderDisconnected(state);
+    paintView(renderDisconnected(state));
     return;
   }
 
@@ -326,7 +332,7 @@ function renderView() {
     state.view !== "settings" &&
     state.view !== "create"
   ) {
-    elements.viewRoot.innerHTML = `
+    paintView(`
       <section class="page page-failure">
         <div class="failure-card">
           <span class="failure-icon">${icon("alert")}</span>
@@ -340,32 +346,33 @@ function renderView() {
           <p class="failure-hint">${icon("shield")} ${escapeHtml(tokenSourceLabel())}</p>
         </div>
       </section>
-    `;
+    `);
     return;
   }
 
   if (state.view === "create") {
     ensureCreateSelections();
-    elements.viewRoot.innerHTML = state.catalog
+    paintView(state.catalog
       ? renderCreate(state)
-      : renderCreateSkeleton(state);
+      : renderCreateSkeleton(state));
     return;
   }
 
   if (state.loading && !state.overview) {
-    elements.viewRoot.innerHTML =
+    paintView(
       state.view === "instances"
         ? renderInstancesSkeleton()
-        : renderOverviewSkeleton();
+        : renderOverviewSkeleton(),
+    );
     return;
   }
 
   if (state.view === "instances") {
-    elements.viewRoot.innerHTML = renderInstances(state);
+    paintView(renderInstances(state));
     return;
   }
 
-  elements.viewRoot.innerHTML = renderOverview(state);
+  paintView(renderOverview(state));
 }
 
 function ensureCreateSelections() {
