@@ -198,6 +198,7 @@ function instanceSeed() {
       image: "linode/ubuntu24.04",
       ipv4: ["172.104.55.21", "192.168.144.12"],
       ipv6: "2400:8907::f03c:95ff:fe90:3a21/128",
+      ipv6_ranges: ["2400:8907:aa01::/64"],
       specs: { disk: 81920, memory: 4096, vcpus: 2, transfer: 4000 },
       tags: ["production", "web", "edge"],
       created: "2026-08-12T09:24:00",
@@ -264,6 +265,7 @@ function instanceSeed() {
       image: "linode/debian12",
       ipv4: ["172.104.61.119"],
       ipv6: "2400:8907::f03c:95ff:fe2b:4188/128",
+      ipv6_ranges: ["2400:8907:bb02::/64"],
       specs: { disk: 163840, memory: 8192, vcpus: 2, transfer: 5000 },
       tags: ["production", "database", "critical"],
       created: "2025-12-03T11:11:00",
@@ -428,6 +430,82 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function isPrivateIpv4(address) {
+  return /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(
+    String(address || ""),
+  );
+}
+
+function normalizeIpv6Range(value) {
+  return String(value || "").trim();
+}
+
+function buildMockIpInfo(instance, reservedIpv4 = []) {
+  const publicAddresses = (instance.ipv4 || []).filter(
+    (address) => !isPrivateIpv4(address),
+  );
+  const privateAddresses = (instance.ipv4 || []).filter(isPrivateIpv4);
+  const toIpv4Record = (address, isPublic) => ({
+    address,
+    gateway: isPublic ? `${address.split(".").slice(0, 3).join(".")}.1` : null,
+    linode_id: instance.id,
+    prefix: 24,
+    public: isPublic,
+    rdns: isPublic ? `${address}.ip.linodeusercontent.com` : null,
+    region: instance.region,
+    reserved: Boolean(isPublic && reservedIpv4.includes(address)),
+    subnet_mask: "255.255.255.0",
+    type: "ipv4",
+  });
+  const ranges = (instance.ipv6_ranges || [])
+    .map((value) => {
+      const range = normalizeIpv6Range(value);
+      const [base, prefixValue] = range.split("/");
+      const prefix = Number(prefixValue);
+      if (!base || ![56, 64].includes(prefix)) {
+        return null;
+      }
+      return {
+        prefix,
+        range: base,
+        region: instance.region,
+        route_target: String(instance.ipv6 || "").replace(/\/\d+$/, ""),
+      };
+    })
+    .filter(Boolean);
+
+  return {
+    ipv4: {
+      private: privateAddresses.map((address) => toIpv4Record(address, false)),
+      public: publicAddresses.map((address) => toIpv4Record(address, true)),
+      reserved: [],
+      shared: [],
+      vpc: [],
+    },
+    ipv6: {
+      global: ranges,
+      link_local: {
+        address: "fe80::1",
+        gateway: "fe80::2",
+        linode_id: instance.id,
+        prefix: 64,
+        public: false,
+        region: instance.region,
+        type: "ipv6",
+      },
+      slaac: {
+        address: String(instance.ipv6 || "").replace(/\/\d+$/, ""),
+        gateway: "fe80::2",
+        linode_id: instance.id,
+        prefix: 128,
+        public: true,
+        region: instance.region,
+        type: "ipv6",
+      },
+    },
+  };
+}
+
 export async function createMockLinode({ port = 0 } = {}) {
   const accountStates = new Map([
     [
@@ -451,6 +529,7 @@ export async function createMockLinode({ port = 0 } = {}) {
         },
         instances: instanceSeed(),
         events: clone(EVENTS),
+        reservedIpv4: [],
       },
     ],
     [
@@ -460,11 +539,19 @@ export async function createMockLinode({ port = 0 } = {}) {
         transfer: clone(ALT_TRANSFER),
         instances: altInstanceSeed(),
         events: clone(ALT_EVENTS),
+        reservedIpv4: [],
       },
     ],
   ]);
   const requests = [];
   let nextId = 62000000;
+  let nextReservedIpv4 = 10;
+  let nextIpv6Range = 3;
+  let failNextIpv6RangeCreate = false;
+  let failNextIpv6RangeDelete = false;
+  let failNextIpDelete = false;
+  let failNextIpv4Assign = false;
+  let failNextReservedDelete = false;
 
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, "http://localhost");
@@ -474,7 +561,9 @@ export async function createMockLinode({ port = 0 } = {}) {
       path,
       query: Object.fromEntries(url.searchParams.entries()),
       headers: request.headers,
-      body: request.method === "POST" ? await readBody(request) : null,
+      body: ["POST", "PUT", "PATCH"].includes(request.method)
+        ? await readBody(request)
+        : null,
     });
 
     const authorization = String(request.headers.authorization || "");
@@ -615,6 +704,296 @@ export async function createMockLinode({ port = 0 } = {}) {
       );
     }
 
+    const ipsMatch = path.match(/^\/linode\/instances\/(\d+)\/ips$/);
+    if (ipsMatch && request.method === "GET") {
+      const instance = accountState.instances.find(
+        (entry) => entry.id === Number(ipsMatch[1]),
+      );
+      if (!instance) {
+        return json(response, 404, {
+          errors: [{ reason: "Not found" }],
+        });
+      }
+      return json(
+        response,
+        200,
+        buildMockIpInfo(instance, accountState.reservedIpv4),
+      );
+    }
+
+    if (path === "/networking/ips/assign" && request.method === "POST") {
+      if (failNextIpv4Assign) {
+        failNextIpv4Assign = false;
+        return json(response, 500, {
+          errors: [{ reason: "Mock IPv4 assignment failed" }],
+        });
+      }
+      const body = requests[requests.length - 1].body || {};
+      if (!Array.isArray(body.assignments) || body.assignments.length === 0) {
+        return json(response, 400, {
+          errors: [{ field: "assignments", reason: "Assignments are required" }],
+        });
+      }
+      if (
+        accountState.instances.some(
+          (instance) =>
+            instance.region !== body.region &&
+            body.assignments.some(
+              (assignment) => assignment.linode_id === instance.id,
+            ),
+        )
+      ) {
+        return json(response, 400, {
+          errors: [{ field: "region", reason: "All resources must be in one region" }],
+        });
+      }
+
+      const ipv4Assignments = body.assignments.filter(
+        (assignment) => !String(assignment.address || "").includes(":"),
+      );
+      const ipv6Assignments = body.assignments.filter((assignment) =>
+        String(assignment.address || "").includes(":"),
+      );
+
+      for (const assignment of ipv4Assignments) {
+        for (const instance of accountState.instances) {
+          instance.ipv4 = instance.ipv4.filter(
+            (address) => address !== assignment.address,
+          );
+        }
+      }
+      for (const assignment of ipv4Assignments) {
+        const instance = accountState.instances.find(
+          (entry) => entry.id === assignment.linode_id,
+        );
+        if (!instance) {
+          return json(response, 404, {
+            errors: [{ reason: "Linode not found" }],
+          });
+        }
+        if (!instance.ipv4.includes(assignment.address)) {
+          instance.ipv4.push(assignment.address);
+        }
+        instance.ipv4.sort(
+          (left, right) => Number(isPrivateIpv4(left)) - Number(isPrivateIpv4(right)),
+        );
+        if (!instance.ipv4.some((address) => !isPrivateIpv4(address))) {
+          return json(response, 400, {
+            errors: [
+              {
+                field: "assignments",
+                reason: "Each Linode must keep at least one public IPv4 address",
+              },
+            ],
+          });
+        }
+      }
+
+      const rangeAssignments = ipv6Assignments.map((assignment) => ({
+        ...assignment,
+        address: normalizeIpv6Range(assignment.address),
+      }));
+      for (const assignment of rangeAssignments) {
+        for (const instance of accountState.instances) {
+          instance.ipv6_ranges = (instance.ipv6_ranges || []).filter(
+            (range) => normalizeIpv6Range(range) !== assignment.address,
+          );
+        }
+      }
+      for (const assignment of rangeAssignments) {
+        const instance = accountState.instances.find(
+          (entry) => entry.id === assignment.linode_id,
+        );
+        if (!instance) {
+          return json(response, 404, {
+            errors: [{ reason: "Linode not found" }],
+          });
+        }
+        instance.ipv6_ranges = instance.ipv6_ranges || [];
+        if (!instance.ipv6_ranges.includes(assignment.address)) {
+          instance.ipv6_ranges.push(assignment.address);
+        }
+      }
+
+      return json(response, 200, {});
+    }
+
+    if (path === "/networking/reserved/ips" && request.method === "POST") {
+      const body = requests[requests.length - 1].body || {};
+      const region = String(body.region || "");
+      if (!region) {
+        return json(response, 400, {
+          errors: [{ field: "region", reason: "Region is required" }],
+        });
+      }
+
+      let address;
+      do {
+        address = `172.104.90.${nextReservedIpv4++}`;
+      } while (
+        accountState.reservedIpv4.includes(address) ||
+        accountState.instances.some((instance) =>
+          instance.ipv4.includes(address),
+        )
+      );
+      accountState.reservedIpv4.push(address);
+      return json(response, 200, {
+        address,
+        gateway: `${address.split(".").slice(0, 3).join(".")}.1`,
+        linode_id: null,
+        prefix: 24,
+        public: true,
+        rdns: `${address}.ip.linodeusercontent.com`,
+        region,
+        reserved: true,
+        subnet_mask: "255.255.255.0",
+        type: "ipv4",
+      });
+    }
+
+    const reservedIpDeleteMatch = path.match(
+      /^\/networking\/reserved\/ips\/([^/]+)$/,
+    );
+    if (reservedIpDeleteMatch && request.method === "DELETE") {
+      if (failNextReservedDelete) {
+        failNextReservedDelete = false;
+        return json(response, 500, {
+          errors: [{ reason: "Mock reserved IP deletion failed" }],
+        });
+      }
+      const address = decodeURIComponent(reservedIpDeleteMatch[1]);
+      accountState.reservedIpv4 = accountState.reservedIpv4.filter(
+        (entry) => entry !== address,
+      );
+      for (const instance of accountState.instances) {
+        instance.ipv4 = instance.ipv4.filter((entry) => entry !== address);
+      }
+      return json(response, 200, {});
+    }
+
+    const ipv4UpdateMatch = path.match(/^\/networking\/ips\/([^/]+)$/);
+    if (ipv4UpdateMatch && request.method === "PUT") {
+      const address = decodeURIComponent(ipv4UpdateMatch[1]);
+      const body = requests[requests.length - 1].body || {};
+      if (body.reserved === false) {
+        accountState.reservedIpv4 = accountState.reservedIpv4.filter(
+          (entry) => entry !== address,
+        );
+      } else if (
+        body.reserved === true &&
+        !accountState.reservedIpv4.includes(address)
+      ) {
+        accountState.reservedIpv4.push(address);
+      }
+      const instance = accountState.instances.find((entry) =>
+        entry.ipv4.includes(address),
+      );
+      return json(response, 200, {
+        address,
+        gateway: null,
+        linode_id: instance?.id || null,
+        prefix: 24,
+        public: !isPrivateIpv4(address),
+        rdns: null,
+        region: instance?.region || "",
+        reserved: accountState.reservedIpv4.includes(address),
+        subnet_mask: "255.255.255.0",
+        type: "ipv4",
+      });
+    }
+
+    const instanceIpDeleteMatch = path.match(
+      /^\/linode\/instances\/(\d+)\/ips\/([^/]+)$/,
+    );
+    if (instanceIpDeleteMatch && request.method === "DELETE") {
+      const instance = accountState.instances.find(
+        (entry) => entry.id === Number(instanceIpDeleteMatch[1]),
+      );
+      if (!instance) {
+        return json(response, 404, {
+          errors: [{ reason: "Not found" }],
+        });
+      }
+      if (failNextIpDelete) {
+        failNextIpDelete = false;
+        return json(response, 500, {
+          errors: [{ reason: "Mock IPv4 deletion failed" }],
+        });
+      }
+      const address = decodeURIComponent(instanceIpDeleteMatch[2]);
+      instance.ipv4 = instance.ipv4.filter((entry) => entry !== address);
+      return json(response, 200, {});
+    }
+
+    if (path === "/networking/ipv6/ranges" && request.method === "POST") {
+      if (failNextIpv6RangeCreate) {
+        failNextIpv6RangeCreate = false;
+        return json(response, 500, {
+          errors: [{ reason: "Mock IPv6 range creation failed" }],
+        });
+      }
+
+      const body = requests[requests.length - 1].body || {};
+      const instance = accountState.instances.find(
+        (entry) => entry.id === Number(body.linode_id),
+      );
+      if (!instance) {
+        return json(response, 404, {
+          errors: [{ reason: "Linode not found" }],
+        });
+      }
+
+      const prefix = Number(body.prefix_length);
+      if (![56, 64].includes(prefix)) {
+        return json(response, 400, {
+          errors: [
+            {
+              field: "prefix_length",
+              reason: "Prefix length must be 56 or 64",
+            },
+          ],
+        });
+      }
+
+      const base = `2400:8907:${(0xcc00 + nextIpv6Range++).toString(16)}::`;
+      instance.ipv6_ranges = instance.ipv6_ranges || [];
+      instance.ipv6_ranges.push(`${base}/${prefix}`);
+      return json(response, 200, {
+        prefix,
+        range: base,
+        region: instance.region,
+        route_target: String(instance.ipv6 || "").replace(/\/\d+$/, ""),
+      });
+    }
+
+    const ipv6RangeDeleteMatch = path.match(
+      /^\/networking\/ipv6\/ranges\/(.+)$/,
+    );
+    if (ipv6RangeDeleteMatch && request.method === "DELETE") {
+      if (failNextIpv6RangeDelete) {
+        failNextIpv6RangeDelete = false;
+        return json(response, 500, {
+          errors: [{ reason: "Mock IPv6 range deletion failed" }],
+        });
+      }
+      let range;
+      try {
+        range = decodeURIComponent(ipv6RangeDeleteMatch[1]);
+      } catch {
+        return json(response, 400, {
+          errors: [{ reason: "Invalid IPv6 range" }],
+        });
+      }
+      const rangeAddress = normalizeIpv6Range(range).split("/")[0];
+      for (const instance of accountState.instances) {
+        instance.ipv6_ranges = (instance.ipv6_ranges || []).filter(
+          (entry) =>
+            normalizeIpv6Range(entry).split("/")[0] !== rangeAddress,
+        );
+      }
+      return json(response, 200, {});
+    }
+
     const actionMatch = path.match(
       /^\/linode\/instances\/(\d+)\/(boot|shutdown|reboot)$/,
     );
@@ -671,6 +1050,49 @@ export async function createMockLinode({ port = 0 } = {}) {
     requests,
     close: () => new Promise((resolve) => server.close(resolve)),
     server,
+    setInstanceIpv4(instanceId, addresses) {
+      for (const state of accountStates.values()) {
+        const instance = state.instances.find(
+          (entry) => entry.id === Number(instanceId),
+        );
+        if (!instance) {
+          continue;
+        }
+        instance.ipv4 = Array.isArray(addresses)
+          ? addresses.map((value) => String(value))
+          : [];
+        return;
+      }
+      throw new Error(`Mock instance ${instanceId} was not found.`);
+    },
+    setFailNextIpv6RangeCreate(value = true) {
+      failNextIpv6RangeCreate = Boolean(value);
+    },
+    setFailNextIpv6RangeDelete(value = true) {
+      failNextIpv6RangeDelete = Boolean(value);
+    },
+    setFailNextIpDelete(value = true) {
+      failNextIpDelete = Boolean(value);
+    },
+    setFailNextIpv4Assign(value = true) {
+      failNextIpv4Assign = Boolean(value);
+    },
+    setFailNextReservedDelete(value = true) {
+      failNextReservedDelete = Boolean(value);
+    },
+    setInstanceStatus(instanceId, status) {
+      for (const state of accountStates.values()) {
+        const instance = state.instances.find(
+          (entry) => entry.id === Number(instanceId),
+        );
+        if (!instance) {
+          continue;
+        }
+        instance.status = String(status);
+        return;
+      }
+      throw new Error(`Mock instance ${instanceId} was not found.`);
+    },
   };
 }
 

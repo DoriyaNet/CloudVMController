@@ -1446,7 +1446,7 @@ export function renderSettings(state) {
             </div>
           </div>
           <ul class="security-list">
-            <li><span>${icon("check")}</span>使用最小权限令牌；仅授予 Linodes 读写和 Account 只读。</li>
+            <li><span>${icon("check")}</span>使用最小权限令牌；授予 Linodes、IPs 读写和 Account 只读。</li>
             <li><span>${icon("check")}</span>令牌和代理密码加密保存在本机，不写入浏览器 localStorage。</li>
             <li><span>${icon("check")}</span>若需通过公网访问，请在前面加 HTTPS 反向代理，并限制来源 IP。</li>
             <li><span>${icon("check")}</span>删除实例不可恢复；控制台会要求输入实例名称二次确认。</li>
@@ -1638,6 +1638,347 @@ function renderBackups(backups) {
   `;
 }
 
+function ipSwapAddress(info, kind) {
+  if (!info) {
+    return "";
+  }
+  if (kind === "ipv6") {
+    return info.ipv6Ranges?.[0]?.range || "";
+  }
+  return info.publicIpv4 || "";
+}
+
+export function renderIpSwapModal(state) {
+  const modal = state.modal;
+  if (!modal || modal.type !== "ip-swap") {
+    return "";
+  }
+
+  const source = modal.instance || {};
+  const candidates = Array.isArray(modal.candidates) ? modal.candidates : [];
+  const kind = modal.kind === "ipv6" ? "ipv6" : "ipv4";
+  const sourceInfo = modal.sourceInfo;
+  const targetInfo = modal.targetInfo;
+  const sourceAddress = ipSwapAddress(sourceInfo, kind);
+  const targetAddress = ipSwapAddress(targetInfo, kind);
+  const selectedCandidate = candidates.find(
+    (candidate) => String(candidate.id) === String(modal.targetId),
+  );
+  const sourceAvailable =
+    kind === "ipv4" ? sourceInfo?.ipv4Swappable : sourceInfo?.ipv6Swappable;
+  const targetAvailable =
+    kind === "ipv4" ? targetInfo?.ipv4Swappable : targetInfo?.ipv6Swappable;
+  const targetLabel =
+    selectedCandidate?.label ||
+    (selectedCandidate ? `linode-${selectedCandidate.id}` : "选择目标实例");
+  const targetRegion = selectedCandidate?.region || source.region || "";
+  const missingKindMessage =
+    kind === "ipv6"
+      ? "至少有一方没有 /56 或 /64 IPv6 路由段。默认 IPv6 SLAAC 地址不可转移。"
+      : "至少有一方没有可交换的公网 IPv4 地址。";
+  const submitDisabled =
+    Boolean(modal.busy) ||
+    Boolean(modal.sourceLoading) ||
+    Boolean(modal.targetLoading) ||
+    !modal.targetId ||
+    !targetInfo ||
+    !sourceAddress ||
+    !targetAddress ||
+    sourceAvailable === false ||
+    targetAvailable === false;
+
+  return `
+    <div class="modal-layer">
+      <div class="modal-backdrop" data-action="close-modal"></div>
+      <section class="modal-card modal-ip-swap" role="dialog" aria-modal="true" aria-labelledby="ip-swap-title">
+        <button type="button" class="icon-button modal-close" data-action="close-modal" aria-label="关闭" ${modal.busy ? "disabled" : ""}>${icon("x")}</button>
+        <span class="modal-mark">${icon("refresh")}</span>
+        <span class="eyebrow">NETWORK ADDRESS SWAP</span>
+        <h2 id="ip-swap-title">交换公网 IP</h2>
+        <p>在同一账户和区域的两台实例之间交换地址。交换完成后需要重启两台实例，新地址才会在系统内生效。</p>
+
+        <div class="form-alert${modal.error ? "" : " is-hidden"}" id="ip-swap-error" role="alert">
+          ${icon("alert")}
+          <span>${escapeHtml(modal.error || "")}</span>
+        </div>
+
+        <form id="ip-swap-form" novalidate>
+          <div class="ip-swap-kind" role="group" aria-label="选择要交换的地址类型">
+            <button
+              type="button"
+              class="ip-swap-kind-option${kind === "ipv4" ? " is-active" : ""}"
+              data-action="ip-swap-kind"
+              data-kind="ipv4"
+              ${modal.busy ? "disabled" : ""}
+            >
+              <span class="ip-swap-kind-copy">
+                <strong>IPv4</strong>
+                <small>公网地址</small>
+              </span>
+              <span class="ip-swap-kind-state ${sourceInfo?.ipv4Swappable ? "is-ready" : sourceInfo ? "is-missing" : ""}">
+                ${sourceInfo ? (sourceInfo.ipv4Swappable ? "可交换" : "不可用") : modal.error ? "未知" : "检查中"}
+              </span>
+            </button>
+            <button
+              type="button"
+              class="ip-swap-kind-option${kind === "ipv6" ? " is-active" : ""}"
+              data-action="ip-swap-kind"
+              data-kind="ipv6"
+              ${modal.busy ? "disabled" : ""}
+            >
+              <span class="ip-swap-kind-copy">
+                <strong>IPv6</strong>
+                <small>路由段 /56 · /64</small>
+              </span>
+              <span class="ip-swap-kind-state ${sourceInfo?.ipv6Swappable ? "is-ready" : sourceInfo ? "is-missing" : ""}">
+                ${sourceInfo ? (sourceInfo.ipv6Swappable ? "可交换" : "不可用") : modal.error ? "未知" : "检查中"}
+              </span>
+            </button>
+          </div>
+
+          <label class="form-field">
+            <span class="field-label">目标实例</span>
+            ${
+              candidates.length > 0
+                ? `<span class="select-wrap">
+                    <span class="select-leading">${icon("network")}</span>
+                    <select id="ip-swap-target" ${modal.busy ? "disabled" : ""}>
+                      <option value="">选择同区域的另一台实例…</option>
+                      ${candidates
+                        .map(
+                          (candidate) => `
+                            <option value="${escapeHtml(candidate.id)}"${String(candidate.id) === String(modal.targetId) ? " selected" : ""}>
+                              ${escapeHtml(candidate.label || `linode-${candidate.id}`)} · #${escapeHtml(candidate.id)}
+                            </option>
+                          `,
+                        )
+                        .join("")}
+                    </select>
+                    ${icon("chevron-down")}
+                  </span>
+                  <span class="field-hint">只显示同一 API 令牌、同一区域内的实例。</span>`
+                : `<span class="ip-swap-empty">${icon("info")} 当前区域没有可用于交换的其他实例。</span>`
+            }
+          </label>
+
+          <div class="ip-swap-compare">
+            <div class="ip-swap-endpoint">
+              <span class="ip-swap-endpoint-label">当前实例</span>
+              <strong>${escapeHtml(source.label || `linode-${source.id}`)}</strong>
+              <small>#${escapeHtml(source.id || "—")} · ${escapeHtml(source.region || "—")}</small>
+              <span class="ip-swap-address mono">${
+                modal.sourceLoading
+                  ? `${spinner()} 读取地址…`
+                  : escapeHtml(sourceAddress || "无可用地址")
+              }</span>
+            </div>
+            <span class="ip-swap-arrow">${icon("refresh")}</span>
+            <div class="ip-swap-endpoint ip-swap-endpoint-target">
+              <span class="ip-swap-endpoint-label">目标实例</span>
+              <strong>${escapeHtml(targetLabel)}</strong>
+              <small>${selectedCandidate ? `#${escapeHtml(selectedCandidate.id)} · ${escapeHtml(targetRegion)}` : "尚未选择"}</small>
+              <span class="ip-swap-address mono">${
+                modal.targetLoading
+                  ? `${spinner()} 读取地址…`
+                  : escapeHtml(targetAddress || (selectedCandidate ? "无可用地址" : "—"))
+              }</span>
+            </div>
+          </div>
+
+          ${
+            kind === "ipv6"
+              ? `<div class="ip-swap-note">${icon("info")}<span>IPv6 仅支持 /56 或 /64 路由段互换。实例默认的 SLAAC 地址由平台绑定，无法转移。</span></div>`
+              : ""
+          }
+          ${
+            sourceInfo &&
+            !modal.targetLoading &&
+            (sourceAvailable === false || (targetInfo && targetAvailable === false))
+              ? `<div class="ip-swap-note is-warning">${icon("alert")}<span>${escapeHtml(missingKindMessage)}</span></div>`
+              : ""
+          }
+          ${
+            sourceInfo?.ipv6Slaac && kind === "ipv6"
+              ? `<div class="ip-swap-slaac"><span>默认 SLAAC</span><code class="mono">${escapeHtml(sourceInfo.ipv6Slaac)}</code><small>不可转移</small></div>`
+              : ""
+          }
+
+          <div class="ip-swap-warning">
+            ${icon("alert")}
+            <span>交换会中断 SSH、网站和其他依赖当前地址的连接。请在操作后分别重启两台实例，并确认系统使用 Network Helper 或手动更新静态网络配置。API 令牌需要 IPs 与 Linodes 的读写权限。</span>
+          </div>
+
+          <div class="modal-actions">
+            <button type="button" class="button button-secondary" data-action="close-modal" ${modal.busy ? "disabled" : ""}>取消</button>
+            <button type="submit" class="button button-primary" ${submitDisabled ? "disabled" : ""}>
+              ${modal.busy ? spinner() : icon("refresh")}
+              <span>${modal.busy ? "正在交换…" : "确认交换"}</span>
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  `;
+}
+
+export function renderIpRenewModal(state) {
+  const modal = state.modal;
+  if (!modal || modal.type !== "ip-renew") {
+    return "";
+  }
+
+  const source = modal.instance || {};
+  const info = modal.sourceInfo;
+  const kind = modal.kind === "ipv6" ? "ipv6" : "ipv4";
+  const prefix = Number(modal.ipv6Prefix) === 56 ? 56 : 64;
+  const currentAddress =
+    kind === "ipv6"
+      ? info?.ipv6Ranges?.[0]?.range || ""
+      : info?.publicIpv4 || "";
+  const hasIpv4 = Boolean(info?.publicIpv4);
+  const hasIpv6 = Boolean(info?.ipv6Ranges?.length);
+  const submitDisabled =
+    Boolean(modal.busy) ||
+    Boolean(modal.sourceLoading) ||
+    !info ||
+    !modal.confirmed ||
+    (kind === "ipv4" && !hasIpv4);
+
+  return `
+    <div class="modal-layer">
+      <div class="modal-backdrop" data-action="close-modal"></div>
+      <section class="modal-card modal-ip-renew" role="dialog" aria-modal="true" aria-labelledby="ip-renew-title">
+        <button type="button" class="icon-button modal-close" data-action="close-modal" aria-label="关闭" ${modal.busy ? "disabled" : ""}>${icon("x")}</button>
+        <span class="modal-mark">${icon("zap")}</span>
+        <span class="eyebrow">NETWORK ADDRESS RENEWAL</span>
+        <h2 id="ip-renew-title">换新 IP</h2>
+        <p>为当前实例申请新的公网地址。旧地址会被释放，操作完成后需要重启实例才能让新地址生效。</p>
+
+        <div class="form-alert${modal.error ? "" : " is-hidden"}" id="ip-renew-error" role="alert">
+          ${icon("alert")}
+          <span>${escapeHtml(modal.error || "")}</span>
+        </div>
+
+        <form id="ip-renew-form" novalidate>
+          <div class="ip-swap-kind" role="group" aria-label="选择要更换的地址类型">
+            <button
+              type="button"
+              class="ip-swap-kind-option${kind === "ipv4" ? " is-active" : ""}"
+              data-action="ip-renew-kind"
+              data-kind="ipv4"
+              ${modal.busy ? "disabled" : ""}
+            >
+              <span class="ip-swap-kind-copy">
+                <strong>IPv4</strong>
+                <small>公网地址</small>
+              </span>
+              <span class="ip-swap-kind-state ${hasIpv4 ? "is-ready" : info ? "is-missing" : ""}">
+                ${info ? (hasIpv4 ? "有旧地址" : "不可更换") : modal.error ? "未知" : "检查中"}
+              </span>
+            </button>
+            <button
+              type="button"
+              class="ip-swap-kind-option${kind === "ipv6" ? " is-active" : ""}"
+              data-action="ip-renew-kind"
+              data-kind="ipv6"
+              ${modal.busy ? "disabled" : ""}
+            >
+              <span class="ip-swap-kind-copy">
+                <strong>IPv6</strong>
+                <small>路由段 /64 · /56</small>
+              </span>
+              <span class="ip-swap-kind-state ${info ? "is-ready" : ""}">
+                ${info ? (hasIpv6 ? "替换旧段" : "将新建") : modal.error ? "未知" : "检查中"}
+              </span>
+            </button>
+          </div>
+
+          <div class="ip-swap-endpoint ip-renew-current">
+            <span class="ip-swap-endpoint-label">当前实例</span>
+            <strong>${escapeHtml(source.label || `linode-${source.id}`)}</strong>
+            <small>#${escapeHtml(source.id || "—")} · ${escapeHtml(source.region || "—")}</small>
+            <span class="ip-renew-current-label">
+              ${kind === "ipv4" ? "当前公网 IPv4" : "当前 IPv6 路由段"}
+            </span>
+            <span class="ip-swap-address ip-renew-address mono">${
+              modal.sourceLoading
+                ? `${spinner()} 读取地址…`
+                : escapeHtml(
+                    currentAddress ||
+                      (kind === "ipv4"
+                        ? "无公网 IPv4"
+                        : "无路由段（将新建）"),
+                  )
+            }</span>
+          </div>
+
+          ${
+            kind === "ipv6"
+              ? `<div class="form-field">
+                  <span class="field-label">新 IPv6 段大小</span>
+                  <div class="ip-swap-kind ip-renew-prefix">
+                    <button
+                      type="button"
+                      class="ip-swap-kind-option${prefix === 64 ? " is-active" : ""}"
+                      data-action="ip-renew-prefix"
+                      data-prefix="64"
+                      ${modal.busy ? "disabled" : ""}
+                    >
+                      <span class="ip-swap-kind-copy"><strong>/64</strong><small>默认</small></span>
+                      <span class="ip-swap-kind-state is-ready">推荐</span>
+                    </button>
+                    <button
+                      type="button"
+                      class="ip-swap-kind-option${prefix === 56 ? " is-active" : ""}"
+                      data-action="ip-renew-prefix"
+                      data-prefix="56"
+                      ${modal.busy ? "disabled" : ""}
+                    >
+                      <span class="ip-swap-kind-copy"><strong>/56</strong><small>更大地址空间</small></span>
+                      <span class="ip-swap-kind-state">高级</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="ip-swap-slaac ip-renew-slaac">
+                  <span>默认 SLAAC</span>
+                  <code class="mono">${escapeHtml(info?.ipv6Slaac || "未分配")}</code>
+                  <small>不可变</small>
+                </div>
+                <div class="ip-swap-warning">
+                  ${icon("alert")}
+                  <span>会先释放当前路由段，再申请全新的 /${prefix} 段。每个账户在每个区域默认只有一个 IPv6 路由段；如果新段申请失败，旧段可能已经释放。默认 SLAAC 地址不会改变。</span>
+                </div>`
+              : `<div class="ip-swap-warning">
+                  ${icon("alert")}
+                  <span>将申请同区域的 Reserved IP，绑定到实例后自动转换为临时 IP，避免持续计费。该操作受账户和区域的 IPv4 配额限制。</span>
+                </div>`
+          }
+
+          ${
+            kind === "ipv4" && info && !hasIpv4
+              ? `<div class="ip-swap-note is-warning">${icon("alert")}<span>当前实例没有公网 IPv4，无法执行 IPv4 换新。请切换到 IPv6 或先分配 IPv4。</span></div>`
+              : ""
+          }
+
+          <label class="simple-checkbox ip-renew-confirm">
+            <input type="checkbox" id="ip-renew-confirm" ${modal.confirmed ? "checked" : ""} ${modal.busy ? "disabled" : ""} />
+            <span>${icon("check")}</span>
+            <span>我了解旧 IP 会释放、且需要重启实例</span>
+          </label>
+
+          <div class="modal-actions">
+            <button type="button" class="button button-secondary" data-action="close-modal" ${modal.busy ? "disabled" : ""}>取消</button>
+            <button type="submit" class="button button-primary" ${submitDisabled ? "disabled" : ""}>
+              ${modal.busy ? spinner() : icon("zap")}
+              <span>${modal.busy ? "正在换新…" : kind === "ipv6" ? "申请新 IPv6 段" : "申请新 IPv4"}</span>
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  `;
+}
+
 export function renderDrawer(state) {
   const detail = state.detail;
   if (!detail.open) {
@@ -1674,7 +2015,11 @@ export function renderDrawer(state) {
     const isOffline = instance.status === "offline";
     const tags = Array.isArray(instance.tags) ? instance.tags : [];
     const ipv4 = instance.ipv4 || [];
-    const primaryAddress = ipv4[0];
+    const primaryAddress = detail.data?.ips?.publicIpv4 || ipv4[0];
+    const slaacAddress = detail.data?.ips?.ipv6Slaac || instance.ipv6 || "";
+    const routedIpv6Ranges = Array.isArray(detail.data?.ips?.ipv6Ranges)
+      ? detail.data.ips.ipv6Ranges
+      : [];
 
     body = `
       <div class="drawer-status-row">
@@ -1718,9 +2063,20 @@ export function renderDrawer(state) {
           </div>
           <div class="address-row">
             <span class="address-type">IPv6</span>
-            <span class="mono address-wrap">${escapeHtml(instance.ipv6 || "未分配")}</span>
-            ${instance.ipv6 ? `<button type="button" class="copy-button" data-copy="${escapeHtml(instance.ipv6)}" aria-label="复制 IPv6">${icon("copy")}</button>` : ""}
+            <span class="mono address-wrap">${escapeHtml(slaacAddress || "未分配")}</span>
+            ${slaacAddress ? `<button type="button" class="copy-button" data-copy="${escapeHtml(slaacAddress)}" aria-label="复制 IPv6">${icon("copy")}</button>` : ""}
           </div>
+          ${routedIpv6Ranges
+            .map(
+              (entry) => `
+                <div class="address-row">
+                  <span class="address-type">IPv6 段</span>
+                  <span class="mono address-wrap">${escapeHtml(entry.range)}</span>
+                  <button type="button" class="copy-button" data-copy="${escapeHtml(entry.range)}" aria-label="复制 IPv6 路由段">${icon("copy")}</button>
+                </div>
+              `,
+            )
+            .join("")}
           ${
             primaryAddress
               ? `<div class="address-row">
@@ -1730,6 +2086,31 @@ export function renderDrawer(state) {
                 </div>`
               : ""
           }
+        </div>
+        <div class="network-swap-row">
+          <span>${icon("info")} 默认 IPv6 为 SLAAC 地址，不可变；IPv6 交换/换新仅针对 /56 或 /64 路由段。</span>
+          <div class="network-swap-actions">
+            <button
+              type="button"
+              class="button button-secondary button-sm"
+              data-action="open-ip-swap"
+              data-id="${escapeHtml(instance.id)}"
+              data-token-id="${escapeHtml(instance.tokenId || "")}"
+              ${isTransitional(instance.status) ? "disabled" : ""}
+            >
+              ${icon("refresh")} <span>交换 IP</span>
+            </button>
+            <button
+              type="button"
+              class="button button-danger-ghost button-sm"
+              data-action="open-ip-renew"
+              data-id="${escapeHtml(instance.id)}"
+              data-token-id="${escapeHtml(instance.tokenId || "")}"
+              ${isTransitional(instance.status) ? "disabled" : ""}
+            >
+              ${icon("zap")} <span>换新 IP</span>
+            </button>
+          </div>
         </div>
       </section>
 

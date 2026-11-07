@@ -6439,6 +6439,374 @@ code {
   }
 }
 
+/* IP swap */
+
+.network-swap-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.network-swap-row > span {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: flex-start;
+  gap: 5px;
+  color: var(--text-4);
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.network-swap-row > span .icon {
+  width: 11px;
+  height: 11px;
+  margin-top: 1px;
+  flex: 0 0 auto;
+}
+
+.network-swap-row .button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.modal-ip-swap {
+  width: min(100%, 560px);
+}
+
+.ip-swap-kind {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.ip-swap-kind-option {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--text-3);
+  background: var(--bg-subtle);
+  text-align: left;
+  transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
+}
+
+.ip-swap-kind-option:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  color: var(--text-2);
+  background: var(--surface-2);
+}
+
+.ip-swap-kind-option.is-active {
+  border-color: rgba(96, 165, 250, 0.36);
+  color: var(--text);
+  background: var(--blue-soft);
+}
+
+.ip-swap-kind-option:disabled {
+  opacity: 0.55;
+}
+
+.ip-swap-kind-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ip-swap-kind-copy strong {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.ip-swap-kind-option.is-active .ip-swap-kind-copy strong {
+  color: var(--text);
+}
+
+.ip-swap-kind-copy small {
+  color: var(--text-4);
+  font-size: 8.5px;
+}
+
+.ip-swap-kind-state {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  color: var(--text-4);
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  white-space: nowrap;
+}
+
+.ip-swap-kind-state.is-ready {
+  border-color: rgba(74, 222, 128, 0.24);
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.ip-swap-kind-state.is-missing {
+  border-color: rgba(248, 113, 113, 0.24);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.ip-swap-compare {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 26px minmax(0, 1fr);
+  align-items: stretch;
+  margin: 14px 0;
+}
+
+.ip-swap-endpoint {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.ip-swap-endpoint-target {
+  border-color: rgba(96, 165, 250, 0.22);
+}
+
+.ip-swap-endpoint-label {
+  color: var(--text-4);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.ip-swap-endpoint strong {
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ip-swap-endpoint small {
+  color: var(--text-4);
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+}
+
+.ip-swap-address {
+  display: flex;
+  min-height: 17px;
+  align-items: center;
+  gap: 5px;
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.ip-swap-address .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.ip-swap-arrow {
+  display: grid;
+  place-items: center;
+  color: var(--text-4);
+}
+
+.ip-swap-arrow .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.ip-swap-note,
+.ip-swap-warning,
+.ip-swap-slaac,
+.ip-swap-empty {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 9px 10px;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  border-radius: var(--radius-sm);
+  color: var(--blue);
+  background: var(--blue-soft);
+  font-size: 9.5px;
+  line-height: 1.55;
+}
+
+.ip-swap-note .icon,
+.ip-swap-warning .icon,
+.ip-swap-empty .icon {
+  width: 12px;
+  height: 12px;
+  margin-top: 1px;
+}
+
+.ip-swap-note.is-warning,
+.ip-swap-warning {
+  border-color: rgba(251, 191, 36, 0.2);
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.ip-swap-slaac {
+  flex-wrap: wrap;
+  border-color: var(--line);
+  color: var(--text-3);
+  background: var(--bg-subtle);
+}
+
+.ip-swap-slaac > span,
+.ip-swap-slaac > small {
+  color: var(--text-4);
+  font-size: 8.5px;
+}
+
+.ip-swap-slaac > small {
+  margin-left: auto;
+  color: var(--danger);
+}
+
+.ip-swap-slaac code {
+  min-width: 0;
+  flex: 1 1 100%;
+  overflow-wrap: anywhere;
+  color: var(--text-2);
+  font-size: 9px;
+}
+
+.ip-swap-empty {
+  margin-top: 0;
+  color: var(--text-3);
+  background: var(--bg-subtle);
+  border-color: var(--line);
+}
+
+.modal-ip-swap .form-alert {
+  margin-bottom: 12px;
+}
+
+@media (max-width: 560px) {
+  .network-swap-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .network-swap-row .button {
+    width: 100%;
+  }
+
+  .ip-swap-kind {
+    grid-template-columns: 1fr;
+  }
+
+  .ip-swap-compare {
+    grid-template-columns: 1fr;
+  }
+
+  .ip-swap-arrow {
+    height: 28px;
+    transform: rotate(90deg);
+  }
+
+  .ip-swap-endpoint strong {
+    font-size: 12px;
+  }
+}
+
+/* IP renew */
+
+.network-swap-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.modal-ip-renew {
+  width: min(100%, 560px);
+}
+
+.ip-renew-current {
+  margin: 14px 0;
+  padding: 12px;
+}
+
+.ip-renew-current-label {
+  margin-top: 6px;
+  color: var(--text-4);
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  letter-spacing: 0.04em;
+}
+
+.ip-renew-address {
+  display: block;
+  min-height: 18px;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.ip-renew-prefix {
+  margin-bottom: 0;
+}
+
+.ip-renew-slaac {
+  margin-top: 12px;
+}
+
+.ip-renew-confirm {
+  align-items: flex-start;
+  margin-top: 15px;
+  line-height: 1.55;
+}
+
+.ip-renew-confirm > span:last-child {
+  flex: 1;
+}
+
+.ip-renew-confirm input:focus-visible + span {
+  outline: 1px solid var(--white);
+  outline-offset: 2px;
+}
+
+.modal-ip-renew .form-alert {
+  margin-bottom: 12px;
+}
+
+@media (max-width: 560px) {
+  .network-swap-actions {
+    width: 100%;
+  }
+
+  .network-swap-actions .button {
+    width: auto;
+    flex: 1 1 120px;
+  }
+
+  .ip-renew-address {
+    font-size: 11px;
+  }
+}
+
 /* Final readability scale */
 
 :root {

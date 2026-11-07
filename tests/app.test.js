@@ -9,6 +9,9 @@ import { createRequestHandler } from "../server/app.js";
 import { openSettingsStore } from "../server/settings-store.js";
 import {
   renderCreate,
+  renderDrawer,
+  renderIpRenewModal,
+  renderIpSwapModal,
   renderInstances,
   renderOverview,
   renderSettings,
@@ -612,4 +615,669 @@ test("serves instance detail with filtered events and stats", async (t) => {
   assert.equal(detail.instance.label, "pilot-edge-01");
   assert.ok(detail.stats.cpu.length > 10);
   assert.ok(detail.events.every((event) => event.entity.id === 58120442));
+});
+
+test("exposes swappable IPv4 and routed IPv6 metadata", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.close());
+
+  const source = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ips`,
+  ).then((response) => response.json());
+  const target = await fetch(
+    `${stack.baseUrl}/api/instances/55190332/ips`,
+  ).then((response) => response.json());
+
+  assert.equal(source.publicIpv4, "172.104.55.21");
+  assert.match(source.ipv6Slaac, /^2400:8907::/);
+  assert.deepEqual(source.ipv6Ranges, [
+    {
+      range: "2400:8907:aa01::/64",
+      prefix: 64,
+      routeTarget: "2400:8907::f03c:95ff:fe90:3a21",
+    },
+  ]);
+  assert.equal(source.ipv4Swappable, true);
+  assert.equal(source.ipv6Swappable, true);
+
+  assert.equal(target.publicIpv4, "172.104.61.119");
+  assert.equal(target.ipv6Ranges[0].range, "2400:8907:bb02::/64");
+});
+
+test("swaps public IPv4 addresses between same-region instances", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.close());
+
+  const response = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ip-swap`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Linode-Pilot": "1",
+      },
+      body: JSON.stringify({
+        targetId: 55190332,
+        kind: "ipv4",
+      }),
+    },
+  );
+  const result = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(result.ok, true);
+  assert.equal(result.kind, "ipv4");
+  assert.equal(result.region, "ap-south");
+  assert.equal(result.source.address, "172.104.55.21");
+  assert.equal(result.source.newAddress, "172.104.61.119");
+  assert.equal(result.target.address, "172.104.61.119");
+  assert.equal(result.target.newAddress, "172.104.55.21");
+  assert.equal(result.requiresReboot, true);
+
+  const sourceAfter = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ips`,
+  ).then((ips) => ips.json());
+  const targetAfter = await fetch(
+    `${stack.baseUrl}/api/instances/55190332/ips`,
+  ).then((ips) => ips.json());
+  assert.equal(sourceAfter.publicIpv4, "172.104.61.119");
+  assert.equal(targetAfter.publicIpv4, "172.104.55.21");
+
+  const assignRequest = stack.mock.requests.find(
+    (entry) =>
+      entry.method === "POST" && entry.path === "/networking/ips/assign",
+  );
+  assert.deepEqual(assignRequest.body, {
+    region: "ap-south",
+    assignments: [
+      { address: "172.104.55.21", linode_id: 55190332 },
+      { address: "172.104.61.119", linode_id: 58120442 },
+    ],
+  });
+});
+
+test("swaps routed IPv6 ranges between same-region instances", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.close());
+
+  const response = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ip-swap`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Linode-Pilot": "1",
+      },
+      body: JSON.stringify({
+        targetId: 55190332,
+        kind: "ipv6",
+      }),
+    },
+  );
+  const result = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(result.kind, "ipv6");
+  assert.equal(result.source.address, "2400:8907:aa01::/64");
+  assert.equal(result.source.newAddress, "2400:8907:bb02::/64");
+  assert.equal(result.target.address, "2400:8907:bb02::/64");
+  assert.equal(result.target.newAddress, "2400:8907:aa01::/64");
+
+  const sourceAfter = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ips`,
+  ).then((ips) => ips.json());
+  const targetAfter = await fetch(
+    `${stack.baseUrl}/api/instances/55190332/ips`,
+  ).then((ips) => ips.json());
+  assert.equal(sourceAfter.ipv6Ranges[0].range, "2400:8907:bb02::/64");
+  assert.equal(targetAfter.ipv6Ranges[0].range, "2400:8907:aa01::/64");
+  assert.match(sourceAfter.ipv6Slaac, /^2400:8907::/);
+});
+
+test("validates IP swap kind, region, and IPv6 range availability", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.close());
+  const headers = {
+    "Content-Type": "application/json",
+    "X-Linode-Pilot": "1",
+  };
+
+  const invalidKind = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ip-swap`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ targetId: 55190332, kind: "ipv5" }),
+    },
+  );
+  assert.equal(invalidKind.status, 400);
+  assert.equal((await invalidKind.json()).code, "INVALID_IP_SWAP_KIND");
+
+  const crossRegion = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ip-swap`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ targetId: 57910311, kind: "ipv4" }),
+    },
+  );
+  assert.equal(crossRegion.status, 400);
+  assert.equal(
+    (await crossRegion.json()).code,
+    "INSTANCE_REGION_MISMATCH",
+  );
+
+  const missingIpv6 = await fetch(
+    `${stack.baseUrl}/api/instances/56492010/ip-swap`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ targetId: 49780310, kind: "ipv6" }),
+    },
+  );
+  assert.equal(missingIpv6.status, 400);
+  assert.equal((await missingIpv6.json()).code, "NO_IPV6_RANGE");
+});
+
+test("renews a public IPv4 address and releases the old address", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.close());
+
+  const response = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ip-renew`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Linode-Pilot": "1",
+      },
+      body: JSON.stringify({ kind: "ipv4" }),
+    },
+  );
+  const result = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(result.ok, true);
+  assert.equal(result.kind, "ipv4");
+  assert.equal(result.region, "ap-south");
+  assert.equal(result.oldAddress, "172.104.55.21");
+  assert.equal(result.newAddress, "172.104.90.10");
+  assert.equal(result.requiresReboot, true);
+  assert.deepEqual(result.warnings, []);
+  assert.equal(result.requiresManualCleanup, undefined);
+
+  const rawIps = await fetch(
+    `${stack.mock.apiBase}/linode/instances/58120442/ips`,
+    {
+      headers: { Authorization: `Bearer ${stack.mock.token}` },
+    },
+  ).then((entry) => entry.json());
+  const addresses = rawIps.ipv4.public.map((entry) => entry.address);
+  assert.equal(addresses.includes("172.104.55.21"), false);
+  assert.equal(addresses.includes("172.104.90.10"), true);
+  assert.equal(
+    rawIps.ipv4.public.find(
+      (entry) => entry.address === "172.104.90.10",
+    ).reserved,
+    false,
+  );
+
+  const reserveRequest = stack.mock.requests.find(
+    (entry) =>
+      entry.method === "POST" && entry.path === "/networking/reserved/ips",
+  );
+  assert.deepEqual(reserveRequest.body, { region: "ap-south" });
+  const unreserveRequest = stack.mock.requests.find(
+    (entry) =>
+      entry.method === "PUT" &&
+      entry.path === "/networking/ips/172.104.90.10",
+  );
+  assert.deepEqual(unreserveRequest.body, { reserved: false });
+  assert.ok(
+    stack.mock.requests.some(
+      (entry) =>
+        entry.method === "DELETE" &&
+        entry.path ===
+          "/linode/instances/58120442/ips/172.104.55.21",
+    ),
+  );
+});
+
+test("replaces an IPv6 routed range without changing SLAAC", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.close());
+
+  const before = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ips`,
+  ).then((response) => response.json());
+  const response = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ip-renew`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Linode-Pilot": "1",
+      },
+      body: JSON.stringify({ kind: "ipv6", ipv6Prefix: 64 }),
+    },
+  );
+  const result = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(result.ok, true);
+  assert.equal(result.kind, "ipv6");
+  assert.equal(result.region, "ap-south");
+  assert.equal(result.oldRange, "2400:8907:aa01::/64");
+  assert.equal(result.newRange, "2400:8907:cc03::/64");
+  assert.equal(result.prefix, 64);
+  assert.equal(result.requiresReboot, true);
+  assert.deepEqual(result.warnings, []);
+
+  const after = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ips`,
+  ).then((entry) => entry.json());
+  assert.equal(after.ipv6Slaac, before.ipv6Slaac);
+  assert.deepEqual(after.ipv6Ranges, [
+    {
+      range: "2400:8907:cc03::/64",
+      prefix: 64,
+      routeTarget: "2400:8907::f03c:95ff:fe90:3a21",
+    },
+  ]);
+
+  const deleteIndex = stack.mock.requests.findIndex(
+    (entry) =>
+      entry.method === "DELETE" &&
+      entry.path ===
+        `/networking/ipv6/ranges/${encodeURIComponent("2400:8907:aa01::")}`,
+  );
+  const createIndex = stack.mock.requests.findIndex(
+    (entry) =>
+      entry.method === "POST" && entry.path === "/networking/ipv6/ranges",
+  );
+  assert.ok(deleteIndex >= 0);
+  assert.ok(createIndex > deleteIndex);
+  assert.deepEqual(stack.mock.requests[createIndex].body, {
+    prefix_length: 64,
+    linode_id: 58120442,
+  });
+});
+
+test("keeps the new IPv4 and warns when old address cleanup fails", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.close());
+  stack.mock.setFailNextIpDelete();
+
+  const response = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ip-renew`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Linode-Pilot": "1",
+      },
+      body: JSON.stringify({ kind: "ipv4" }),
+    },
+  );
+  const result = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(result.newAddress, "172.104.90.10");
+  assert.equal(result.requiresManualCleanup, true);
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0], /旧 IPv4 172\.104\.55\.21 未能自动释放/);
+
+  const rawIps = await fetch(
+    `${stack.mock.apiBase}/linode/instances/58120442/ips`,
+    {
+      headers: { Authorization: `Bearer ${stack.mock.token}` },
+    },
+  ).then((entry) => entry.json());
+  const addresses = rawIps.ipv4.public.map((entry) => entry.address);
+  assert.equal(addresses.includes("172.104.90.10"), true);
+  assert.equal(addresses.includes("172.104.55.21"), true);
+});
+
+test("reports when a failed IPv4 assignment cannot roll back its reservation", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.close());
+  stack.mock.setFailNextIpv4Assign();
+  stack.mock.setFailNextReservedDelete();
+
+  const response = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ip-renew`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Linode-Pilot": "1",
+      },
+      body: JSON.stringify({ kind: "ipv4" }),
+    },
+  );
+  const payload = await response.json();
+
+  assert.equal(response.status, 502);
+  assert.equal(payload.code, "IPV4_ASSIGN_CLEANUP_FAILED");
+  assert.match(payload.error, /172\.104\.90\.10/);
+  assert.match(payload.error, /手动删除/);
+  assert.ok(
+    stack.mock.requests.some(
+      (entry) =>
+        entry.method === "DELETE" &&
+        entry.path === "/networking/reserved/ips/172.104.90.10",
+    ),
+  );
+});
+
+test("rejects IP renewal while the instance is transitional", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.close());
+  stack.mock.setInstanceStatus(58120442, "rebooting");
+
+  const response = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ip-renew`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Linode-Pilot": "1",
+      },
+      body: JSON.stringify({ kind: "ipv4" }),
+    },
+  );
+  const payload = await response.json();
+
+  assert.equal(response.status, 409);
+  assert.equal(payload.code, "INSTANCE_TRANSITIONAL");
+  assert.equal(
+    stack.mock.requests.some(
+      (entry) =>
+        entry.method === "POST" && entry.path === "/networking/reserved/ips",
+    ),
+    false,
+  );
+});
+
+test("does not replace an IPv6 range when deleting the old range fails", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.close());
+  const before = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ips`,
+  ).then((response) => response.json());
+  stack.mock.setFailNextIpv6RangeDelete();
+
+  const response = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ip-renew`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Linode-Pilot": "1",
+      },
+      body: JSON.stringify({ kind: "ipv6", ipv6Prefix: 64 }),
+    },
+  );
+  const payload = await response.json();
+
+  assert.equal(response.status, 502);
+  assert.equal(payload.code, "IPV6_RANGE_DELETE_FAILED");
+
+  const after = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ips`,
+  ).then((entry) => entry.json());
+  assert.deepEqual(after.ipv6Ranges, before.ipv6Ranges);
+  assert.equal(
+    stack.mock.requests.some(
+      (entry) =>
+        entry.method === "POST" && entry.path === "/networking/ipv6/ranges",
+    ),
+    false,
+  );
+});
+
+test("rejects unsupported IPv6 renewal prefixes before changing ranges", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.close());
+  const headers = {
+    "Content-Type": "application/json",
+    "X-Linode-Pilot": "1",
+  };
+
+  for (const ipv6Prefix of [48, 32]) {
+    const response = await fetch(
+      `${stack.baseUrl}/api/instances/58120442/ip-renew`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ kind: "ipv6", ipv6Prefix }),
+      },
+    );
+    const payload = await response.json();
+    assert.equal(response.status, 400);
+    assert.equal(payload.code, "INVALID_IPV6_PREFIX");
+  }
+
+  assert.equal(
+    stack.mock.requests.some(
+      (entry) =>
+        entry.method === "DELETE" &&
+        entry.path.startsWith("/networking/ipv6/ranges/"),
+    ),
+    false,
+  );
+  assert.equal(
+    stack.mock.requests.some(
+      (entry) =>
+        entry.method === "POST" && entry.path === "/networking/ipv6/ranges",
+    ),
+    false,
+  );
+});
+
+test("rejects IPv4 renewal when the instance has no public IPv4", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.close());
+  stack.mock.setInstanceIpv4(58120442, ["192.168.144.12"]);
+
+  const response = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ip-renew`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Linode-Pilot": "1",
+      },
+      body: JSON.stringify({ kind: "ipv4" }),
+    },
+  );
+  const payload = await response.json();
+
+  assert.equal(response.status, 400);
+  assert.equal(payload.code, "NO_PUBLIC_IPV4");
+  assert.equal(
+    stack.mock.requests.some(
+      (entry) =>
+        entry.method === "POST" && entry.path === "/networking/reserved/ips",
+    ),
+    false,
+  );
+});
+
+test("reports the released old range when IPv6 replacement creation fails", async (t) => {
+  const stack = await startStack();
+  t.after(() => stack.close());
+  const before = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ips`,
+  ).then((response) => response.json());
+  stack.mock.setFailNextIpv6RangeCreate();
+
+  const response = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ip-renew`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Linode-Pilot": "1",
+      },
+      body: JSON.stringify({ kind: "ipv6", ipv6Prefix: 64 }),
+    },
+  );
+  const payload = await response.json();
+
+  assert.equal(response.status, 502);
+  assert.equal(payload.code, "IPV6_RANGE_REPLACE_FAILED");
+  assert.match(payload.error, /旧 IPv6 路由段已释放/);
+
+  const after = await fetch(
+    `${stack.baseUrl}/api/instances/58120442/ips`,
+  ).then((entry) => entry.json());
+  assert.deepEqual(after.ipv6Ranges, []);
+  assert.equal(after.ipv6Slaac, before.ipv6Slaac);
+});
+
+test("renders the IP swap modal and routed IPv6 ranges in the drawer", () => {
+  const instance = {
+    id: 58120442,
+    label: "pilot-edge-01",
+    status: "running",
+    region: "ap-south",
+    type: "g6-standard-2",
+    image: "linode/ubuntu24.04",
+    ipv4: ["172.104.55.21"],
+    ipv6: "2400:8907::f03c:95ff:fe90:3a21/128",
+    specs: { disk: 81920, memory: 4096, vcpus: 2, transfer: 4000 },
+    tags: [],
+    created: "2026-08-12T09:24:00",
+    updated: "2026-11-07T00:00:00",
+    tokenId: "token-1",
+    accountLabel: "Northstar Labs",
+  };
+  const sourceInfo = {
+    publicIpv4: "172.104.55.21",
+    ipv6Slaac: "2400:8907::f03c:95ff:fe90:3a21",
+    ipv6Ranges: [{ range: "2400:8907:aa01::/64", prefix: 64 }],
+    ipv4Swappable: true,
+    ipv6Swappable: true,
+  };
+  const targetInfo = {
+    publicIpv4: "172.104.61.119",
+    ipv6Slaac: "2400:8907::f03c:95ff:fe2b:4188",
+    ipv6Ranges: [{ range: "2400:8907:bb02::/64", prefix: 64 }],
+    ipv4Swappable: true,
+    ipv6Swappable: true,
+  };
+
+  const drawer = renderDrawer({
+    catalog: null,
+    busyActions: new Set(),
+    detail: {
+      open: true,
+      id: String(instance.id),
+      tokenId: instance.tokenId,
+      loading: false,
+      error: null,
+      data: {
+        instance,
+        stats: null,
+        backups: null,
+        events: [],
+        ips: sourceInfo,
+      },
+    },
+  });
+  assert.match(drawer, /data-action="open-ip-swap"/);
+  assert.match(drawer, /data-action="open-ip-renew"/);
+  assert.match(drawer, /2400:8907:aa01::\/64/);
+  assert.match(drawer, /IPv6 段/);
+
+  const modal = renderIpSwapModal({
+    modal: {
+      type: "ip-swap",
+      instance,
+      candidates: [
+        {
+          id: "55190332",
+          label: "analytics-db",
+          region: "ap-south",
+        },
+      ],
+      sourceInfo,
+      targetInfo,
+      kind: "ipv6",
+      targetId: "55190332",
+      sourceLoading: false,
+      targetLoading: false,
+      error: "",
+      busy: false,
+    },
+  });
+  assert.match(modal, /id="ip-swap-form"/);
+  assert.match(modal, /id="ip-swap-target"/);
+  assert.match(modal, /2400:8907:aa01::\/64/);
+  assert.match(modal, /2400:8907:bb02::\/64/);
+  assert.match(modal, /默认 SLAAC/);
+  assert.match(modal, /确认交换/);
+});
+
+test("renders IPv4, IPv6 /56, and unavailable renewal states", () => {
+  const instance = {
+    id: 58120442,
+    label: "pilot-edge-01",
+    status: "running",
+    region: "ap-south",
+    tokenId: "token-1",
+  };
+  const sourceInfo = {
+    publicIpv4: "172.104.55.21",
+    ipv6Slaac: "2400:8907::f03c:95ff:fe90:3a21",
+    ipv6Ranges: [{ range: "2400:8907:aa01::/64", prefix: 64 }],
+  };
+  const baseModal = {
+    type: "ip-renew",
+    instance,
+    sourceInfo,
+    sourceLoading: false,
+    kind: "ipv4",
+    ipv6Prefix: 64,
+    confirmed: false,
+    error: "",
+    busy: false,
+  };
+
+  const ipv4 = renderIpRenewModal({ modal: baseModal });
+  assert.match(ipv4, /id="ip-renew-form"/);
+  assert.match(ipv4, /172\.104\.55\.21/);
+  assert.match(ipv4, /申请新 IPv4/);
+  assert.match(ipv4, /Reserved IP/);
+  assert.match(
+    ipv4,
+    /<button type="submit" class="button button-primary" disabled>/,
+  );
+
+  const ipv6 = renderIpRenewModal({
+    modal: {
+      ...baseModal,
+      kind: "ipv6",
+      ipv6Prefix: 56,
+      confirmed: true,
+      busy: true,
+    },
+  });
+  assert.match(ipv6, /data-prefix="56"/);
+  assert.match(ipv6, /data-prefix="64"/);
+  assert.match(ipv6, /2400:8907:aa01::\/64/);
+  assert.match(ipv6, /默认 SLAAC/);
+  assert.match(ipv6, /不可变/);
+  assert.match(ipv6, /先释放当前路由段/);
+  assert.match(ipv6, /正在换新/);
+  assert.match(ipv6, /data-action="close-modal"[^>]*disabled/);
+
+  const unavailable = renderIpRenewModal({
+    modal: {
+      ...baseModal,
+      sourceInfo: { ...sourceInfo, publicIpv4: "" },
+    },
+  });
+  assert.match(unavailable, /无法执行 IPv4 换新/);
 });

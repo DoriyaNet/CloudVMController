@@ -19,6 +19,8 @@ import {
   renderCreateSummary,
   renderDisconnected,
   renderDrawer as renderDrawerView,
+  renderIpRenewModal,
+  renderIpSwapModal,
   renderInstances,
   renderInstancesSkeleton,
   renderOverview,
@@ -815,6 +817,7 @@ function renderModal() {
               <span class="scope-title">${icon("shield")} 推荐权限</span>
               <span class="scope-list">
                 <span>Linodes <strong>Read / Write</strong></span>
+                <span>IPs <strong>Read / Write</strong></span>
                 <span>Account <strong>Read Only</strong></span>
                 <span>Images <strong>Read Only</strong></span>
                 <span>Events <strong>Read Only</strong></span>
@@ -887,8 +890,13 @@ function renderModal() {
         </section>
       </div>
     `;
+  } else if (state.modal.type === "ip-swap") {
+    elements.modalRoot.innerHTML = renderIpSwapModal(state);
+  } else if (state.modal.type === "ip-renew") {
+    elements.modalRoot.innerHTML = renderIpRenewModal(state);
   }
 
+  enhanceSelects(elements.modalRoot);
   syncBodyLock();
   requestAnimationFrame(() => {
     elements.modalRoot.querySelector(".modal-card")?.classList.add("is-open");
@@ -1102,6 +1110,314 @@ async function handleDeleteSubmit(event) {
   }
 }
 
+function ipSwapCandidates(instance) {
+  const tokenId = instance?.tokenId || "";
+  return (state.overview?.instances || [])
+    .filter(
+      (entry) =>
+        String(entry.id) !== String(instance.id) &&
+        String(entry.tokenId || "") === String(tokenId) &&
+        entry.region === instance.region &&
+        !isTransitional(entry.status),
+    )
+    .map((entry) => ({
+      id: String(entry.id),
+      label: entry.label || `linode-${entry.id}`,
+      region: entry.region,
+    }))
+    .sort((left, right) =>
+      left.label.localeCompare(right.label, "zh-CN"),
+    );
+}
+
+async function openIpSwapModal(instance) {
+  if (!instance || isTransitional(instance.status)) {
+    return;
+  }
+
+  state.modal = {
+    type: "ip-swap",
+    instance,
+    candidates: ipSwapCandidates(instance),
+    sourceInfo: null,
+    sourceLoading: true,
+    targetInfo: null,
+    targetId: "",
+    targetLoading: false,
+    kind: "ipv4",
+    error: "",
+    busy: false,
+  };
+  renderModal();
+  updateShell();
+
+  try {
+    const info = await api.instanceIps(instance.id, instance.tokenId);
+    if (
+      state.modal?.type !== "ip-swap" ||
+      String(state.modal.instance?.id) !== String(instance.id)
+    ) {
+      return;
+    }
+    state.modal.sourceInfo = info;
+    state.modal.sourceLoading = false;
+    if (!info.ipv4Swappable && info.ipv6Swappable) {
+      state.modal.kind = "ipv6";
+    }
+  } catch (error) {
+    if (
+      state.modal?.type !== "ip-swap" ||
+      String(state.modal.instance?.id) !== String(instance.id)
+    ) {
+      return;
+    }
+    state.modal.sourceLoading = false;
+    state.modal.error = friendlyError(error);
+  }
+
+  renderModal();
+}
+
+async function loadIpSwapTarget(targetId) {
+  if (state.modal?.type !== "ip-swap") {
+    return;
+  }
+  const modal = state.modal;
+  modal.targetId = targetId ? String(targetId) : "";
+  modal.targetInfo = null;
+  modal.error = "";
+
+  const candidate = modal.candidates.find(
+    (entry) => String(entry.id) === String(targetId),
+  );
+  if (!candidate) {
+    modal.targetLoading = false;
+    renderModal();
+    return;
+  }
+
+  modal.targetLoading = true;
+  renderModal();
+
+  try {
+    const info = await api.instanceIps(candidate.id, modal.instance.tokenId);
+    if (
+      state.modal?.type !== "ip-swap" ||
+      String(state.modal.targetId) !== String(candidate.id)
+    ) {
+      return;
+    }
+    state.modal.targetInfo = info;
+    state.modal.targetLoading = false;
+  } catch (error) {
+    if (
+      state.modal?.type !== "ip-swap" ||
+      String(state.modal.targetId) !== String(candidate.id)
+    ) {
+      return;
+    }
+    state.modal.targetLoading = false;
+    state.modal.error = friendlyError(error);
+  }
+
+  renderModal();
+}
+
+async function handleIpSwapSubmit(event) {
+  event.preventDefault();
+  if (state.modal?.type !== "ip-swap" || state.modal.busy) {
+    return;
+  }
+
+  const modal = state.modal;
+  const info = modal.sourceInfo;
+  const targetInfo = modal.targetInfo;
+  const kind = modal.kind === "ipv6" ? "ipv6" : "ipv4";
+  const sourceAddress =
+    kind === "ipv6"
+      ? info?.ipv6Ranges?.[0]?.range
+      : info?.publicIpv4;
+  const targetAddress =
+    kind === "ipv6"
+      ? targetInfo?.ipv6Ranges?.[0]?.range
+      : targetInfo?.publicIpv4;
+
+  if (!modal.targetId || !targetInfo || !sourceAddress || !targetAddress) {
+    modal.error =
+      kind === "ipv6"
+        ? "双方都必须拥有 /56 或 /64 IPv6 路由段，且目标实例已加载完成。"
+        : "双方都必须拥有可交换的公网 IPv4 地址，且目标实例已加载完成。";
+    renderModal();
+    return;
+  }
+
+  modal.busy = true;
+  modal.error = "";
+  renderModal();
+
+  try {
+    const sourceId = modal.instance.id;
+    const tokenId = modal.instance.tokenId;
+    await api.swapIp(sourceId, tokenId, {
+      targetId: Number(modal.targetId),
+      kind,
+    });
+
+    state.modal = null;
+    renderModal();
+    updateShell();
+    showToast(
+      `已交换${kind === "ipv4" ? " IPv4 公网地址" : " IPv6 路由段"}，请重启两台实例后生效`,
+      "success",
+    );
+
+    await loadOverview({ silent: true, suppressRender: true });
+    if (
+      state.detail.open &&
+      String(state.detail.id) === String(sourceId)
+    ) {
+      await loadDetail(sourceId, tokenId, { silent: true });
+    } else if (state.view !== "create") {
+      renderView();
+    }
+    updateShell();
+  } catch (error) {
+    if (state.modal?.type === "ip-swap") {
+      state.modal.busy = false;
+      state.modal.error = friendlyError(error);
+      renderModal();
+    }
+  }
+}
+
+async function openIpRenewModal(instance) {
+  if (!instance || isTransitional(instance.status)) {
+    return;
+  }
+
+  state.modal = {
+    type: "ip-renew",
+    instance,
+    sourceInfo: null,
+    sourceLoading: true,
+    kind: "ipv4",
+    ipv6Prefix: 64,
+    confirmed: false,
+    error: "",
+    busy: false,
+  };
+  renderModal();
+  updateShell();
+
+  try {
+    const info = await api.instanceIps(instance.id, instance.tokenId);
+    if (
+      state.modal?.type !== "ip-renew" ||
+      String(state.modal.instance?.id) !== String(instance.id)
+    ) {
+      return;
+    }
+    state.modal.sourceInfo = info;
+    state.modal.sourceLoading = false;
+    if (!info.publicIpv4) {
+      state.modal.kind = "ipv6";
+    }
+  } catch (error) {
+    if (
+      state.modal?.type !== "ip-renew" ||
+      String(state.modal.instance?.id) !== String(instance.id)
+    ) {
+      return;
+    }
+    state.modal.sourceLoading = false;
+    state.modal.error = friendlyError(error);
+  }
+
+  renderModal();
+}
+
+async function handleIpRenewSubmit(event) {
+  event.preventDefault();
+  if (state.modal?.type !== "ip-renew" || state.modal.busy) {
+    return;
+  }
+
+  const modal = state.modal;
+  const info = modal.sourceInfo;
+  const kind = modal.kind === "ipv6" ? "ipv6" : "ipv4";
+  if (!info) {
+    modal.error = "尚未读取到实例的当前网络信息，请稍后重试。";
+    renderModal();
+    return;
+  }
+  if (!modal.confirmed) {
+    modal.error = "请先确认旧 IP 会释放且实例需要重启。";
+    renderModal();
+    return;
+  }
+  if (kind === "ipv4" && !info.publicIpv4) {
+    modal.error = "当前实例没有可替换的公网 IPv4 地址。";
+    renderModal();
+    return;
+  }
+
+  modal.busy = true;
+  modal.error = "";
+  renderModal();
+
+  try {
+    const sourceId = modal.instance.id;
+    const tokenId = modal.instance.tokenId;
+    const payload =
+      kind === "ipv6"
+        ? { kind, ipv6Prefix: Number(modal.ipv6Prefix) === 56 ? 56 : 64 }
+        : { kind };
+    const result = await api.renewIp(sourceId, tokenId, payload);
+
+    state.modal = null;
+    renderModal();
+    updateShell();
+
+    const newValue =
+      kind === "ipv4" ? result?.newAddress || "" : result?.newRange || "";
+    showToast(
+      newValue
+        ? `已获取新${kind === "ipv4" ? " IPv4 地址" : " IPv6 路由段"} ${newValue}，请重启实例后生效`
+        : "IP 已换新，请重启实例后生效",
+      "success",
+    );
+
+    const warnings = Array.isArray(result?.warnings)
+      ? result.warnings
+          .filter((warning) => typeof warning === "string" && warning.trim())
+          .map((warning) => warning.trim())
+      : [];
+    if (warnings.length > 0) {
+      showToast(`换新 IP 警告：${warnings.join("；")}`, "error");
+    }
+
+    await loadOverview({ silent: true, suppressRender: true });
+    if (
+      state.detail.open &&
+      String(state.detail.id) === String(sourceId)
+    ) {
+      await loadDetail(sourceId, tokenId, { silent: true });
+    } else if (state.view !== "create") {
+      renderView();
+    }
+    updateShell();
+    setTimeout(() => {
+      void refreshAfterAction(sourceId, tokenId);
+    }, 4_000);
+  } catch (error) {
+    if (state.modal?.type === "ip-renew") {
+      state.modal.busy = false;
+      state.modal.error = friendlyError(error);
+      renderModal();
+    }
+  }
+}
+
 async function loadDetail(instanceId, tokenId, { silent = false } = {}) {
   const requestedTokenId = tokenId || null;
   if (!silent) {
@@ -1111,7 +1427,17 @@ async function loadDetail(instanceId, tokenId, { silent = false } = {}) {
   }
 
   try {
-    const data = await api.detail(instanceId, requestedTokenId);
+    const [detailResult, ipsResult] = await Promise.allSettled([
+      api.detail(instanceId, requestedTokenId),
+      api.instanceIps(instanceId, requestedTokenId),
+    ]);
+    if (detailResult.status !== "fulfilled") {
+      throw detailResult.reason;
+    }
+    const data = detailResult.value;
+    if (ipsResult.status === "fulfilled") {
+      data.ips = ipsResult.value;
+    }
     if (
       !state.detail.open ||
       String(state.detail.id) !== String(instanceId) ||
@@ -1739,6 +2065,54 @@ function handleClick(event) {
       openDeleteModal(instance);
       break;
     }
+    case "open-ip-swap": {
+      const instance =
+        state.detail.data?.instance ||
+        state.overview?.instances?.find(
+          (entry) =>
+            String(entry.id) === String(target.dataset.id) &&
+            (!target.dataset.tokenId ||
+              String(entry.tokenId) === String(target.dataset.tokenId)),
+        );
+      void openIpSwapModal(instance);
+      break;
+    }
+    case "ip-swap-kind":
+      if (state.modal?.type === "ip-swap" && !state.modal.busy) {
+        state.modal.kind =
+          target.dataset.kind === "ipv6" ? "ipv6" : "ipv4";
+        state.modal.error = "";
+        renderModal();
+      }
+      break;
+    case "open-ip-renew": {
+      const instance =
+        state.detail.data?.instance ||
+        state.overview?.instances?.find(
+          (entry) =>
+            String(entry.id) === String(target.dataset.id) &&
+            (!target.dataset.tokenId ||
+              String(entry.tokenId) === String(target.dataset.tokenId)),
+        );
+      void openIpRenewModal(instance);
+      break;
+    }
+    case "ip-renew-kind":
+      if (state.modal?.type === "ip-renew" && !state.modal.busy) {
+        state.modal.kind =
+          target.dataset.kind === "ipv6" ? "ipv6" : "ipv4";
+        state.modal.error = "";
+        renderModal();
+      }
+      break;
+    case "ip-renew-prefix":
+      if (state.modal?.type === "ip-renew" && !state.modal.busy) {
+        state.modal.ipv6Prefix =
+          target.dataset.prefix === "56" ? 56 : 64;
+        state.modal.error = "";
+        renderModal();
+      }
+      break;
     case "retry-catalog":
       void loadCatalog();
       break;
@@ -1787,6 +2161,30 @@ function handleInput(event) {
 function handleChange(event) {
   const target = event.target;
 
+  if (target.id === "ip-swap-target") {
+    void loadIpSwapTarget(target.value);
+    return;
+  }
+  if (target.id === "ip-renew-confirm") {
+    if (state.modal?.type === "ip-renew") {
+      state.modal.confirmed = target.checked;
+      state.modal.error = "";
+      document.querySelector("#ip-renew-error")?.classList.add("is-hidden");
+      const submit = document.querySelector(
+        '#ip-renew-form button[type="submit"]',
+      );
+      if (submit) {
+        const info = state.modal.sourceInfo;
+        submit.disabled =
+          Boolean(state.modal.busy) ||
+          Boolean(state.modal.sourceLoading) ||
+          !info ||
+          !target.checked ||
+          (state.modal.kind === "ipv4" && !info.publicIpv4);
+      }
+    }
+    return;
+  }
   if (target.id === "account-filter") {
     state.filters.account = target.value;
     renderView();
@@ -1881,6 +2279,10 @@ function handleSubmit(event) {
     void handleProxySubmit(event);
   } else if (event.target.id === "delete-form") {
     void handleDeleteSubmit(event);
+  } else if (event.target.id === "ip-swap-form") {
+    void handleIpSwapSubmit(event);
+  } else if (event.target.id === "ip-renew-form") {
+    void handleIpRenewSubmit(event);
   } else if (event.target.id === "create-form") {
     void handleCreateSubmit(event);
   }

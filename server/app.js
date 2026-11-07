@@ -16,6 +16,7 @@ const DEFAULT_PUBLIC_DIR = path.resolve(__dirname, "../public");
 const MAX_BODY_BYTES = 96 * 1024;
 const MAX_PAGE_SIZE = 500;
 const ALLOWED_ACTIONS = new Set(["boot", "shutdown", "reboot"]);
+const IP_SWAP_KINDS = new Set(["ipv4", "ipv6"]);
 const CSRF_HEADERS = ["x-cloudvmcontroller", "x-linode-pilot"];
 const CSRF_VALUE = "1";
 
@@ -640,6 +641,127 @@ async function resolveInstanceTarget(
   );
 }
 
+function findPublicIpv4Record(payload) {
+  const sharedAddresses = new Set(
+    Array.isArray(payload?.ipv4?.shared)
+      ? payload.ipv4.shared
+          .map((entry) => entry?.address)
+          .filter((address) => typeof address === "string")
+      : [],
+  );
+
+  if (!Array.isArray(payload?.ipv4?.public)) {
+    return null;
+  }
+
+  return (
+    payload.ipv4.public.find(
+      (entry) =>
+        typeof entry?.address === "string" &&
+        entry.public !== false &&
+        !sharedAddresses.has(entry.address),
+    ) || null
+  );
+}
+
+function normalizeIpInfo(payload) {
+  const publicIpv4 = findPublicIpv4Record(payload);
+  const ipv6Ranges = Array.isArray(payload?.ipv6?.global)
+    ? payload.ipv6.global
+        .map((entry) => {
+          const rawRange = cleanString(entry?.range, { maxLength: 128 });
+          const prefix = Number(entry?.prefix);
+          if (
+            !rawRange ||
+            !Number.isInteger(prefix) ||
+            ![56, 64].includes(prefix)
+          ) {
+            return null;
+          }
+          return {
+            range: rawRange.includes("/")
+              ? rawRange
+              : `${rawRange}/${prefix}`,
+            prefix,
+            routeTarget: cleanString(entry?.route_target, { maxLength: 128 }),
+          };
+        })
+        .filter(Boolean)
+    : [];
+
+  return {
+    publicIpv4: publicIpv4?.address || "",
+    ipv6Slaac: cleanString(payload?.ipv6?.slaac?.address, {
+      maxLength: 128,
+    }),
+    ipv6Ranges,
+  };
+}
+
+function requireRenewableInstance(instance) {
+  if (!["running", "offline"].includes(instance?.status)) {
+    throw new HttpError(
+      409,
+      "The instance is changing state. Wait for it to settle before renewing IPs.",
+      "INSTANCE_TRANSITIONAL",
+    );
+  }
+}
+
+function normalizeIpv6RangeResult(payload, prefix) {
+  const range = cleanString(payload?.range, { maxLength: 128 });
+  if (!range) {
+    return "";
+  }
+  return range.includes("/") ? range : `${range}/${prefix}`;
+}
+
+function ipv6RangeAddress(range) {
+  return cleanString(range, { maxLength: 128 }).split("/")[0] || "";
+}
+
+function ipOperationErrorMessage(error) {
+  return (
+    cleanString(error?.message, { maxLength: 240 }) ||
+    "Linode API 未返回错误详情。"
+  );
+}
+
+function ipOperationErrorDetails(error) {
+  return Array.isArray(error?.details) ? error.details : [];
+}
+
+function buildIpSwapSummary(instance, ipInfo) {
+  return {
+    instanceId: Number(instance.id),
+    label: instance.label || `linode-${instance.id}`,
+    region: instance.region || "",
+    status: instance.status || "",
+    publicIpv4: ipInfo.publicIpv4,
+    ipv6Slaac: ipInfo.ipv6Slaac,
+    ipv6Ranges: ipInfo.ipv6Ranges,
+    ipv4Swappable: Boolean(ipInfo.publicIpv4),
+    ipv6Swappable: ipInfo.ipv6Ranges.length > 0,
+  };
+}
+
+function requireSwappableInstance(instance, ipInfo) {
+  if (!["running", "offline"].includes(instance?.status)) {
+    throw new HttpError(
+      409,
+      "The instance is changing state. Wait for it to settle before swapping IPs.",
+      "INSTANCE_TRANSITIONAL",
+    );
+  }
+  if (!ipInfo.publicIpv4 && ipInfo.ipv6Ranges.length === 0) {
+    throw new HttpError(
+      400,
+      "The instance has no swappable public IP addresses.",
+      "NO_SWAPPABLE_IP",
+    );
+  }
+}
+
 function accountLabel(account) {
   if (!account) {
     return "";
@@ -1070,6 +1192,395 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
         200,
         await buildDetail(target.client, instanceId, target.credential),
       );
+      return;
+    }
+
+    const instanceIpsMatch = pathname.match(
+      /^\/api\/instances\/(\d+)\/ips$/,
+    );
+    if (instanceIpsMatch) {
+      if (request.method !== "GET") {
+        methodNotAllowed(response, ["GET"]);
+        return;
+      }
+      const instanceId = validateInstanceId(instanceIpsMatch[1]);
+      const target = await resolveInstanceTarget(
+        settingsStore,
+        apiBase,
+        proxy,
+        instanceId,
+        url.searchParams.get("tokenId"),
+      );
+      const [instance, ipPayload] = await Promise.all([
+        target.client.request(`/linode/instances/${instanceId}`),
+        target.client.request(`/linode/instances/${instanceId}/ips`),
+      ]);
+      sendJson(
+        response,
+        200,
+        buildIpSwapSummary(instance, normalizeIpInfo(ipPayload)),
+      );
+      return;
+    }
+
+    const ipSwapMatch = pathname.match(
+      /^\/api\/instances\/(\d+)\/ip-swap$/,
+    );
+    if (ipSwapMatch) {
+      if (request.method !== "POST") {
+        methodNotAllowed(response, ["POST"]);
+        return;
+      }
+      const instanceId = validateInstanceId(ipSwapMatch[1]);
+      const body = await readJsonBody(request);
+      const targetId = validateInstanceId(String(body.targetId || ""));
+      const kind = cleanString(body.kind, { maxLength: 16 });
+      if (!IP_SWAP_KINDS.has(kind)) {
+        throw new HttpError(
+          400,
+          "IP swap kind must be either ipv4 or ipv6.",
+          "INVALID_IP_SWAP_KIND",
+        );
+      }
+      if (targetId === instanceId) {
+        throw new HttpError(
+          400,
+          "Choose a different instance for the IP swap.",
+          "SAME_INSTANCE",
+        );
+      }
+
+      const target = await resolveInstanceTarget(
+        settingsStore,
+        apiBase,
+        proxy,
+        instanceId,
+        url.searchParams.get("tokenId"),
+      );
+      let sourceInstance;
+      let targetInstance;
+      let sourceIpPayload;
+      let targetIpPayload;
+      try {
+        [sourceInstance, targetInstance, sourceIpPayload, targetIpPayload] =
+          await Promise.all([
+            target.client.request(`/linode/instances/${instanceId}`),
+            target.client.request(`/linode/instances/${targetId}`),
+            target.client.request(`/linode/instances/${instanceId}/ips`),
+            target.client.request(`/linode/instances/${targetId}/ips`),
+          ]);
+      } catch (error) {
+        if (error instanceof LinodeError && error.status === 404) {
+          throw new HttpError(
+            404,
+            "The target instance was not found in the selected account.",
+            "TARGET_INSTANCE_NOT_FOUND",
+          );
+        }
+        throw error;
+      }
+
+      if (sourceInstance.region !== targetInstance.region) {
+        throw new HttpError(
+          400,
+          "Both instances must be in the same region to swap IP addresses.",
+          "INSTANCE_REGION_MISMATCH",
+        );
+      }
+
+      const sourceIps = normalizeIpInfo(sourceIpPayload);
+      const targetIps = normalizeIpInfo(targetIpPayload);
+      requireSwappableInstance(sourceInstance, sourceIps);
+      requireSwappableInstance(targetInstance, targetIps);
+
+      let sourceAddress;
+      let targetAddress;
+      if (kind === "ipv4") {
+        sourceAddress = sourceIps.publicIpv4;
+        targetAddress = targetIps.publicIpv4;
+        if (!sourceAddress || !targetAddress) {
+          throw new HttpError(
+            400,
+            "Both instances must have a public IPv4 address.",
+            "NO_PUBLIC_IPV4",
+          );
+        }
+      } else {
+        sourceAddress = sourceIps.ipv6Ranges[0]?.range;
+        targetAddress = targetIps.ipv6Ranges[0]?.range;
+        if (!sourceAddress || !targetAddress) {
+          throw new HttpError(
+            400,
+            "Both instances must have an IPv6 /56 or /64 routed range. SLAAC /128 addresses cannot be transferred.",
+            "NO_IPV6_RANGE",
+          );
+        }
+      }
+
+      const assignments = [
+        { address: sourceAddress, linode_id: Number(targetId) },
+        { address: targetAddress, linode_id: Number(instanceId) },
+      ];
+      await target.client.request("/networking/ips/assign", {
+        method: "POST",
+        body: {
+          region: sourceInstance.region,
+          assignments,
+        },
+      });
+
+      sendJson(response, 200, {
+        ok: true,
+        kind,
+        region: sourceInstance.region,
+        source: {
+          id: Number(instanceId),
+          label: sourceInstance.label || `linode-${instanceId}`,
+          address: sourceAddress,
+          newAddress: targetAddress,
+        },
+        target: {
+          id: Number(targetId),
+          label: targetInstance.label || `linode-${targetId}`,
+          address: targetAddress,
+          newAddress: sourceAddress,
+        },
+        requiresReboot: true,
+      });
+      return;
+    }
+
+    const ipRenewMatch = pathname.match(
+      /^\/api\/instances\/(\d+)\/ip-renew$/,
+    );
+    if (ipRenewMatch) {
+      if (request.method !== "POST") {
+        methodNotAllowed(response, ["POST"]);
+        return;
+      }
+
+      const instanceId = validateInstanceId(ipRenewMatch[1]);
+      const body = await readJsonBody(request);
+      const kind = cleanString(body.kind, { maxLength: 16 });
+      if (!IP_SWAP_KINDS.has(kind)) {
+        throw new HttpError(
+          400,
+          "IP renewal kind must be either ipv4 or ipv6.",
+          "INVALID_IP_RENEW_KIND",
+        );
+      }
+
+      let ipv6Prefix = 64;
+      if (kind === "ipv6" && body.ipv6Prefix !== undefined) {
+        ipv6Prefix = Number(body.ipv6Prefix);
+        if (![56, 64].includes(ipv6Prefix)) {
+          throw new HttpError(
+            400,
+            "IPv6 prefix must be either 56 or 64.",
+            "INVALID_IPV6_PREFIX",
+          );
+        }
+      }
+
+      const target = await resolveInstanceTarget(
+        settingsStore,
+        apiBase,
+        proxy,
+        instanceId,
+        url.searchParams.get("tokenId"),
+      );
+      const [instance, ipPayload] = await Promise.all([
+        target.client.request(`/linode/instances/${instanceId}`),
+        target.client.request(`/linode/instances/${instanceId}/ips`),
+      ]);
+      requireRenewableInstance(instance);
+      const ipInfo = normalizeIpInfo(ipPayload);
+
+      if (kind === "ipv4") {
+        const oldRecord = findPublicIpv4Record(ipPayload);
+        const oldAddress = cleanString(oldRecord?.address, { maxLength: 64 });
+        if (!oldAddress) {
+          throw new HttpError(
+            400,
+            "The instance does not have a public IPv4 address to renew.",
+            "NO_PUBLIC_IPV4",
+          );
+        }
+
+        let newAddress = "";
+        try {
+          const allocation = await target.client.request(
+            "/networking/reserved/ips",
+            {
+              method: "POST",
+              body: { region: instance.region },
+            },
+          );
+          newAddress = cleanString(allocation?.address, { maxLength: 64 });
+          if (!newAddress) {
+            throw new HttpError(
+              502,
+              "Linode API did not return the allocated IPv4 address.",
+              "IPV4_ALLOCATION_FAILED",
+            );
+          }
+
+          await target.client.request("/networking/ips/assign", {
+            method: "POST",
+            body: {
+              region: instance.region,
+              assignments: [
+                {
+                  address: newAddress,
+                  linode_id: Number(instanceId),
+                },
+              ],
+            },
+          });
+        } catch (error) {
+          let cleanupError = null;
+          if (newAddress) {
+            try {
+              await target.client.request(
+                `/networking/reserved/ips/${encodeURIComponent(newAddress)}`,
+                { method: "DELETE" },
+              );
+            } catch (rollbackError) {
+              cleanupError = rollbackError;
+            }
+          }
+          if (cleanupError) {
+            throw new HttpError(
+              502,
+              `新的 IPv4 ${newAddress} 未能绑定到实例，且自动释放该 Reserved IP 也失败：${ipOperationErrorMessage(cleanupError)}。请在 Linode 控制台手动删除该地址，避免持续计费。原始错误：${ipOperationErrorMessage(error)}`,
+              "IPV4_ASSIGN_CLEANUP_FAILED",
+              ipOperationErrorDetails(error),
+            );
+          }
+          throw error;
+        }
+
+        const warnings = [];
+        try {
+          await target.client.request(
+            `/networking/ips/${encodeURIComponent(newAddress)}`,
+            {
+              method: "PUT",
+              body: { reserved: false },
+            },
+          );
+        } catch (error) {
+          warnings.push(
+            `新 IPv4 ${newAddress} 已绑定到实例，但未能取消 Reserved 状态：${ipOperationErrorMessage(error)}。该地址可能继续产生保留 IP 费用。`,
+          );
+        }
+
+        if (oldRecord.reserved === true) {
+          try {
+            await target.client.request(
+              `/networking/ips/${encodeURIComponent(oldAddress)}`,
+              {
+                method: "PUT",
+                body: { reserved: false },
+              },
+            );
+          } catch (error) {
+            warnings.push(
+              `旧 Reserved IPv4 ${oldAddress} 未能取消保留状态：${ipOperationErrorMessage(error)}。`,
+            );
+          }
+        }
+
+        let requiresManualCleanup = false;
+        try {
+          await target.client.request(
+            `/linode/instances/${instanceId}/ips/${encodeURIComponent(oldAddress)}`,
+            { method: "DELETE" },
+          );
+        } catch (error) {
+          requiresManualCleanup = true;
+          warnings.push(
+            `旧 IPv4 ${oldAddress} 未能自动释放：${ipOperationErrorMessage(error)}。请在 Linode 控制台手动清理，避免继续占用配额或计费。`,
+          );
+        }
+
+        const result = {
+          ok: true,
+          kind,
+          region: instance.region || "",
+          oldAddress,
+          newAddress,
+          requiresReboot: true,
+          warnings,
+        };
+        if (requiresManualCleanup) {
+          result.requiresManualCleanup = true;
+        }
+        sendJson(response, 200, result);
+        return;
+      }
+
+      const oldRange = ipInfo.ipv6Ranges[0]?.range || null;
+      if (oldRange) {
+        const oldRangeAddress = ipv6RangeAddress(oldRange);
+        try {
+          await target.client.request(
+            `/networking/ipv6/ranges/${encodeURIComponent(oldRangeAddress)}`,
+            { method: "DELETE" },
+          );
+        } catch (error) {
+          throw new HttpError(
+            502,
+            `旧 IPv6 路由段未能释放：${ipOperationErrorMessage(error)}`,
+            "IPV6_RANGE_DELETE_FAILED",
+            ipOperationErrorDetails(error),
+          );
+        }
+      }
+
+      let newRange;
+      try {
+        const created = await target.client.request(
+          "/networking/ipv6/ranges",
+          {
+            method: "POST",
+            body: {
+              prefix_length: ipv6Prefix,
+              linode_id: Number(instanceId),
+            },
+          },
+        );
+        newRange = normalizeIpv6RangeResult(created, ipv6Prefix);
+        if (!newRange) {
+          throw new Error("Linode API did not return the new IPv6 range.");
+        }
+      } catch (error) {
+        if (oldRange) {
+          throw new HttpError(
+            502,
+            `旧 IPv6 路由段已释放，但新的 /${ipv6Prefix} 路由段申请失败：${ipOperationErrorMessage(error)}`,
+            "IPV6_RANGE_REPLACE_FAILED",
+            ipOperationErrorDetails(error),
+          );
+        }
+        throw new HttpError(
+          502,
+          `新的 /${ipv6Prefix} IPv6 路由段申请失败：${ipOperationErrorMessage(error)}`,
+          "IPV6_RANGE_CREATE_FAILED",
+          ipOperationErrorDetails(error),
+        );
+      }
+
+      sendJson(response, 200, {
+        ok: true,
+        kind,
+        region: instance.region || "",
+        oldRange,
+        newRange,
+        prefix: ipv6Prefix,
+        requiresReboot: true,
+        warnings: [],
+      });
       return;
     }
 

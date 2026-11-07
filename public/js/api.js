@@ -118,6 +118,23 @@ export function createApi({ onUnauthorized } = {}) {
         ...options,
         skipUnauthorized: true,
       }),
+    instanceIps: (id, tokenId, options) =>
+      request(withTokenQuery(`/instances/${id}/ips`, tokenId), {
+        ...options,
+        skipUnauthorized: true,
+      }),
+    swapIp: (id, tokenId, payload) =>
+      request(withTokenQuery(`/instances/${id}/ip-swap`, tokenId), {
+        method: "POST",
+        body: payload,
+        skipUnauthorized: true,
+      }),
+    renewIp: (id, tokenId, payload) =>
+      request(withTokenQuery(`/instances/${id}/ip-renew`, tokenId), {
+        method: "POST",
+        body: payload,
+        skipUnauthorized: true,
+      }),
     availability: (region, tokenId, options) =>
       request(
         withTokenQuery(
