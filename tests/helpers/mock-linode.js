@@ -440,7 +440,7 @@ function normalizeIpv6Range(value) {
   return String(value || "").trim();
 }
 
-function buildMockIpInfo(instance, reservedIpv4 = []) {
+function buildMockIpInfo(instance) {
   const publicAddresses = (instance.ipv4 || []).filter(
     (address) => !isPrivateIpv4(address),
   );
@@ -453,7 +453,6 @@ function buildMockIpInfo(instance, reservedIpv4 = []) {
     public: isPublic,
     rdns: isPublic ? `${address}.ip.linodeusercontent.com` : null,
     region: instance.region,
-    reserved: Boolean(isPublic && reservedIpv4.includes(address)),
     subnet_mask: "255.255.255.0",
     type: "ipv4",
   });
@@ -529,7 +528,6 @@ export async function createMockLinode({ port = 0 } = {}) {
         },
         instances: instanceSeed(),
         events: clone(EVENTS),
-        reservedIpv4: [],
       },
     ],
     [
@@ -539,19 +537,17 @@ export async function createMockLinode({ port = 0 } = {}) {
         transfer: clone(ALT_TRANSFER),
         instances: altInstanceSeed(),
         events: clone(ALT_EVENTS),
-        reservedIpv4: [],
       },
     ],
   ]);
   const requests = [];
   let nextId = 62000000;
-  let nextReservedIpv4 = 10;
+  let nextExtraIpv4 = 10;
   let nextIpv6Range = 3;
   let failNextIpv6RangeCreate = false;
   let failNextIpv6RangeDelete = false;
   let failNextIpDelete = false;
-  let failNextIpv4Assign = false;
-  let failNextReservedDelete = false;
+  let failNextIpv4Create = false;
 
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, "http://localhost");
@@ -705,7 +701,7 @@ export async function createMockLinode({ port = 0 } = {}) {
     }
 
     const ipsMatch = path.match(/^\/linode\/instances\/(\d+)\/ips$/);
-    if (ipsMatch && request.method === "GET") {
+    if (ipsMatch) {
       const instance = accountState.instances.find(
         (entry) => entry.id === Number(ipsMatch[1]),
       );
@@ -714,20 +710,48 @@ export async function createMockLinode({ port = 0 } = {}) {
           errors: [{ reason: "Not found" }],
         });
       }
-      return json(
-        response,
-        200,
-        buildMockIpInfo(instance, accountState.reservedIpv4),
-      );
+      if (request.method === "GET") {
+        return json(response, 200, buildMockIpInfo(instance));
+      }
+      if (request.method === "POST") {
+        if (failNextIpv4Create) {
+          failNextIpv4Create = false;
+          return json(response, 500, {
+            errors: [{ reason: "Mock additional IPv4 allocation failed" }],
+          });
+        }
+        const body = requests[requests.length - 1].body || {};
+        if (body.type !== "ipv4" || body.public !== true) {
+          return json(response, 400, {
+            errors: [
+              {
+                field: "type",
+                reason: "Only public IPv4 allocations are supported",
+              },
+            ],
+          });
+        }
+
+        let address;
+        do {
+          address = `172.104.90.${nextExtraIpv4++}`;
+        } while (
+          [...accountStates.values()].some((state) =>
+            state.instances.some((entry) => entry.ipv4.includes(address)),
+          )
+        );
+        instance.ipv4.push(address);
+        return json(
+          response,
+          200,
+          buildMockIpInfo(instance).ipv4.public.find(
+            (entry) => entry.address === address,
+          ),
+        );
+      }
     }
 
     if (path === "/networking/ips/assign" && request.method === "POST") {
-      if (failNextIpv4Assign) {
-        failNextIpv4Assign = false;
-        return json(response, 500, {
-          errors: [{ reason: "Mock IPv4 assignment failed" }],
-        });
-      }
       const body = requests[requests.length - 1].body || {};
       if (!Array.isArray(body.assignments) || body.assignments.length === 0) {
         return json(response, 400, {
@@ -818,90 +842,6 @@ export async function createMockLinode({ port = 0 } = {}) {
       return json(response, 200, {});
     }
 
-    if (path === "/networking/reserved/ips" && request.method === "POST") {
-      const body = requests[requests.length - 1].body || {};
-      const region = String(body.region || "");
-      if (!region) {
-        return json(response, 400, {
-          errors: [{ field: "region", reason: "Region is required" }],
-        });
-      }
-
-      let address;
-      do {
-        address = `172.104.90.${nextReservedIpv4++}`;
-      } while (
-        accountState.reservedIpv4.includes(address) ||
-        accountState.instances.some((instance) =>
-          instance.ipv4.includes(address),
-        )
-      );
-      accountState.reservedIpv4.push(address);
-      return json(response, 200, {
-        address,
-        gateway: `${address.split(".").slice(0, 3).join(".")}.1`,
-        linode_id: null,
-        prefix: 24,
-        public: true,
-        rdns: `${address}.ip.linodeusercontent.com`,
-        region,
-        reserved: true,
-        subnet_mask: "255.255.255.0",
-        type: "ipv4",
-      });
-    }
-
-    const reservedIpDeleteMatch = path.match(
-      /^\/networking\/reserved\/ips\/([^/]+)$/,
-    );
-    if (reservedIpDeleteMatch && request.method === "DELETE") {
-      if (failNextReservedDelete) {
-        failNextReservedDelete = false;
-        return json(response, 500, {
-          errors: [{ reason: "Mock reserved IP deletion failed" }],
-        });
-      }
-      const address = decodeURIComponent(reservedIpDeleteMatch[1]);
-      accountState.reservedIpv4 = accountState.reservedIpv4.filter(
-        (entry) => entry !== address,
-      );
-      for (const instance of accountState.instances) {
-        instance.ipv4 = instance.ipv4.filter((entry) => entry !== address);
-      }
-      return json(response, 200, {});
-    }
-
-    const ipv4UpdateMatch = path.match(/^\/networking\/ips\/([^/]+)$/);
-    if (ipv4UpdateMatch && request.method === "PUT") {
-      const address = decodeURIComponent(ipv4UpdateMatch[1]);
-      const body = requests[requests.length - 1].body || {};
-      if (body.reserved === false) {
-        accountState.reservedIpv4 = accountState.reservedIpv4.filter(
-          (entry) => entry !== address,
-        );
-      } else if (
-        body.reserved === true &&
-        !accountState.reservedIpv4.includes(address)
-      ) {
-        accountState.reservedIpv4.push(address);
-      }
-      const instance = accountState.instances.find((entry) =>
-        entry.ipv4.includes(address),
-      );
-      return json(response, 200, {
-        address,
-        gateway: null,
-        linode_id: instance?.id || null,
-        prefix: 24,
-        public: !isPrivateIpv4(address),
-        rdns: null,
-        region: instance?.region || "",
-        reserved: accountState.reservedIpv4.includes(address),
-        subnet_mask: "255.255.255.0",
-        type: "ipv4",
-      });
-    }
-
     const instanceIpDeleteMatch = path.match(
       /^\/linode\/instances\/(\d+)\/ips\/([^/]+)$/,
     );
@@ -921,7 +861,22 @@ export async function createMockLinode({ port = 0 } = {}) {
         });
       }
       const address = decodeURIComponent(instanceIpDeleteMatch[2]);
-      instance.ipv4 = instance.ipv4.filter((entry) => entry !== address);
+      if (!instance.ipv4.includes(address)) {
+        return json(response, 404, {
+          errors: [{ reason: "IP address not found on this Linode" }],
+        });
+      }
+      const remaining = instance.ipv4.filter((entry) => entry !== address);
+      if (!remaining.some((entry) => !isPrivateIpv4(entry))) {
+        return json(response, 400, {
+          errors: [
+            {
+              reason: "A Linode must keep at least one public IPv4 address",
+            },
+          ],
+        });
+      }
+      instance.ipv4 = remaining;
       return json(response, 200, {});
     }
 
@@ -1074,11 +1029,8 @@ export async function createMockLinode({ port = 0 } = {}) {
     setFailNextIpDelete(value = true) {
       failNextIpDelete = Boolean(value);
     },
-    setFailNextIpv4Assign(value = true) {
-      failNextIpv4Assign = Boolean(value);
-    },
-    setFailNextReservedDelete(value = true) {
-      failNextReservedDelete = Boolean(value);
+    setFailNextIpv4Create(value = true) {
+      failNextIpv4Create = Boolean(value);
     },
     setInstanceStatus(instanceId, status) {
       for (const state of accountStates.values()) {

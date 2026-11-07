@@ -9,6 +9,13 @@ import {
   createProxyAgent,
   probeUrl,
 } from "./linode.js";
+import {
+  OracleClient,
+  OracleError,
+  isOracleInstanceId,
+  normalizeOracleAccountInput,
+  normalizeOracleInstance,
+} from "./oracle.js";
 import { SettingsStoreError } from "./settings-store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -132,8 +139,9 @@ function createCredentialClient(credential, apiBase, proxy) {
   });
 }
 
-function credentialEntries(settingsStore, apiBase, proxy) {
-  return requireCredentials(settingsStore)
+function optionalCredentialEntries(settingsStore, apiBase, proxy) {
+  return settingsStore
+    .getCredentials()
     .slice()
     .sort((left, right) => Number(right.active) - Number(left.active))
     .map((credential) => ({
@@ -142,12 +150,52 @@ function credentialEntries(settingsStore, apiBase, proxy) {
     }));
 }
 
+function credentialEntries(settingsStore, apiBase, proxy) {
+  requireCredentials(settingsStore);
+  return optionalCredentialEntries(settingsStore, apiBase, proxy);
+}
+
+function createOracleCredentialClient(account, proxy, endpointResolver) {
+  return new OracleClient({
+    tenancyId: account.tenancyId,
+    userId: account.userId,
+    fingerprint: account.fingerprint,
+    privateKey: account.privateKey,
+    region: account.region,
+    compartmentId: account.compartmentId,
+    proxy,
+    endpointResolver,
+  });
+}
+
+function optionalOracleEntries(settingsStore, proxy, endpointResolver) {
+  return settingsStore.getOracleAccounts().map((account) => ({
+    account,
+    client: createOracleCredentialClient(account, proxy, endpointResolver),
+  }));
+}
+
+function annotateOracleInstance(instance, account) {
+  return {
+    ...normalizeOracleInstance(instance, {
+      region: account.region,
+      account,
+    }),
+    accountId: account.id,
+    tokenId: account.id,
+    tokenLabel: account.label,
+    accountLabel: account.label,
+  };
+}
+
 function annotateInstance(instance, credential, account = null) {
   if (!instance) {
     return instance;
   }
   return {
     ...instance,
+    provider: "linode",
+    providerLabel: "Akamai Cloud",
     tokenId: credential.tokenId,
     tokenLabel: credential.label,
     accountLabel:
@@ -389,7 +437,7 @@ function errorMessage(error) {
   return error?.message || "账户数据读取失败";
 }
 
-async function buildOverview(entries) {
+async function buildOverview(entries, oracleEntries = []) {
   const slices = await Promise.all(
     entries.map(async ({ credential, client }) => {
       const [instancesResult, accountResult, transferResult, eventsResult] =
@@ -426,6 +474,8 @@ async function buildOverview(entries) {
       );
 
       return {
+        provider: "linode",
+        providerLabel: "Akamai Cloud",
         tokenId: credential.tokenId,
         tokenLabel: credential.label,
         accountLabel: label,
@@ -438,12 +488,52 @@ async function buildOverview(entries) {
       };
     }),
   );
+  const oracleSlices = await Promise.all(
+    oracleEntries.map(async ({ account, client }) => {
+      try {
+        const rawInstances = await client.listInstances();
+        const instances = rawInstances.map((instance) =>
+          annotateOracleInstance(instance, account),
+        );
+        return {
+          provider: "oracle",
+          providerLabel: "Oracle Cloud",
+          accountId: account.id,
+          tokenId: account.id,
+          tokenLabel: account.label,
+          accountLabel: account.label,
+          account: null,
+          transfer: null,
+          instances,
+          events: [],
+          error: null,
+          accountError: null,
+        };
+      } catch (error) {
+        return {
+          provider: "oracle",
+          providerLabel: "Oracle Cloud",
+          accountId: account.id,
+          tokenId: account.id,
+          tokenLabel: account.label,
+          accountLabel: account.label,
+          account: null,
+          transfer: null,
+          instances: [],
+          events: [],
+          error,
+          accountError: null,
+        };
+      }
+    }),
+  );
+  const allSlices = [...slices, ...oracleSlices];
 
   const seenInstances = new Set();
-  const instances = slices
+  const instances = allSlices
     .flatMap((slice) => slice.instances)
     .filter((instance) => {
-      const key = String(instance.id);
+      const key = `${instance.provider || "linode"}:${instance.id}`;
       if (seenInstances.has(key)) {
         return false;
       }
@@ -451,7 +541,7 @@ async function buildOverview(entries) {
       return true;
     });
   const seenEvents = new Set();
-  const events = slices
+  const events = allSlices
     .flatMap((slice) => slice.events)
     .filter((event) => {
       const key = String(event.id);
@@ -492,8 +582,11 @@ async function buildOverview(entries) {
         accountCount: accountSlices.length,
       }
     : null;
-  const accounts = slices.map((slice) => ({
+  const accounts = allSlices.map((slice) => ({
+    provider: slice.provider,
+    providerLabel: slice.providerLabel,
     tokenId: slice.tokenId,
+    accountId: slice.accountId || "",
     tokenLabel: slice.tokenLabel,
     label: slice.accountLabel,
     email: slice.account?.email || "",
@@ -506,7 +599,7 @@ async function buildOverview(entries) {
       slice.error || slice.accountError
         ? errorMessage(slice.error || slice.accountError)
         : "",
-    accountAvailable: Boolean(slice.account),
+    accountAvailable: Boolean(slice.account) || slice.provider === "oracle",
   }));
 
   return {
@@ -515,8 +608,8 @@ async function buildOverview(entries) {
     transfer: detectedTransfer,
     instances,
     events,
-    poolSize: entries.length,
-    errors: slices
+    poolSize: entries.length + oracleEntries.length,
+    errors: allSlices
       .filter((slice) => slice.error)
       .map((slice) => ({
         tokenId: slice.tokenId,
@@ -574,8 +667,8 @@ async function buildDetail(client, instanceId, credential) {
   };
 }
 
-async function listAggregateInstances(entries) {
-  const slices = await Promise.all(
+async function listAggregateInstances(entries, oracleEntries = []) {
+  const linodeSlices = await Promise.all(
     entries.map(async ({ credential, client }) => {
       try {
         const instances = await client.listAll("/linode/instances");
@@ -590,12 +683,33 @@ async function listAggregateInstances(entries) {
       }
     }),
   );
+  const oracleSlices = await Promise.all(
+    oracleEntries.map(async ({ account, client }) => {
+      try {
+        const instances = await client.listInstances();
+        return {
+          instances: instances.map((instance) =>
+            annotateOracleInstance(instance, account),
+          ),
+          error: null,
+          label: account.label,
+        };
+      } catch (error) {
+        return {
+          instances: [],
+          error,
+          label: account.label,
+        };
+      }
+    }),
+  );
+  const slices = [...linodeSlices, ...oracleSlices];
 
   return {
     data: slices.flatMap((slice) => slice.instances),
     errors: slices
       .filter((slice) => slice.error)
-      .map((slice) => errorMessage(slice.error)),
+      .map((slice) => `${slice.label || "云账户"}: ${errorMessage(slice.error)}`),
   };
 }
 
@@ -639,6 +753,106 @@ async function resolveInstanceTarget(
     "The instance was not found in any connected account.",
     "INSTANCE_NOT_FOUND",
   );
+}
+
+function oracleAccountSummary(account) {
+  return {
+    id: account.id,
+    label: account.label,
+    tenancyId: account.tenancyId,
+    userId: account.userId,
+    region: account.region,
+    compartmentId: account.compartmentId || "",
+  };
+}
+
+async function resolveOracleTarget(
+  settingsStore,
+  proxy,
+  instanceId,
+  accountId,
+  endpointResolver,
+) {
+  const accounts = settingsStore.getOracleAccounts();
+  if (accounts.length === 0) {
+    throw new HttpError(
+      401,
+      "Connect an Oracle Cloud account to continue.",
+      "ORACLE_ACCOUNT_REQUIRED",
+    );
+  }
+
+  const requestedId = cleanString(accountId, { maxLength: 128 });
+  const candidates = requestedId
+    ? accounts.filter((account) => account.id === requestedId)
+    : accounts;
+  if (candidates.length === 0) {
+    throw new HttpError(
+      404,
+      "The selected Oracle Cloud account does not exist.",
+      "ORACLE_ACCOUNT_NOT_FOUND",
+    );
+  }
+
+  for (const account of candidates) {
+    const client = createOracleCredentialClient(
+      account,
+      proxy,
+      endpointResolver,
+    );
+    try {
+      const instance = await client.getInstance(instanceId);
+      return {
+        account,
+        client,
+        instance: annotateOracleInstance(instance, account),
+      };
+    } catch (error) {
+      if (
+        error instanceof OracleError &&
+        [401, 403, 404].includes(error.status)
+      ) {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw new HttpError(
+    404,
+    "The Oracle Cloud instance was not found in any connected account.",
+    "ORACLE_INSTANCE_NOT_FOUND",
+  );
+}
+
+async function buildOracleDetail(target) {
+  const { account, client, instance } = target;
+  let ips;
+  let ipsError = null;
+  try {
+    ips = await client.getInstanceIps(instance);
+  } catch (error) {
+    if (error instanceof OracleError && error.status === 403) {
+      ipsError = "当前 OCI 凭据没有读取 VNIC 的权限。";
+    } else {
+      throw error;
+    }
+  }
+
+  return {
+    provider: "oracle",
+    providerLabel: "Oracle Cloud",
+    instance,
+    stats: null,
+    backups: null,
+    events: [],
+    ips: ips || null,
+    ipsError,
+    tokenId: account.id,
+    tokenLabel: account.label,
+    accountLabel: account.label,
+    account: oracleAccountSummary(account),
+  };
 }
 
 function findPublicIpv4Record(payload) {
@@ -796,6 +1010,30 @@ async function verifyApiToken({ token, apiBase, proxy, timeoutMs = 20_000 }) {
   };
 }
 
+async function verifyOracleAccount({
+  account,
+  proxy,
+  endpointResolver,
+  timeoutMs = 20_000,
+}) {
+  const client = new OracleClient({
+    tenancyId: account.tenancyId,
+    userId: account.userId,
+    fingerprint: account.fingerprint,
+    privateKey: account.privateKey,
+    region: account.region,
+    compartmentId: account.compartmentId,
+    proxy,
+    timeoutMs,
+    endpointResolver,
+  });
+  const verification = await client.verify();
+  return {
+    ...verification,
+    accountLabel: account.label || account.region,
+  };
+}
+
 function buildProxyDraft(settingsStore, input = {}, { enabledByDefault = true } = {}) {
   const saved = settingsStore.getProxyConfig();
   return {
@@ -813,7 +1051,23 @@ function buildProxyDraft(settingsStore, input = {}, { enabledByDefault = true } 
   };
 }
 
-function createRouter({ settingsStore, apiBase, publicDir }) {
+function oracleComputeProbeUrl(account, endpointResolver) {
+  const base =
+    typeof endpointResolver === "function"
+      ? endpointResolver({
+          service: "compute",
+          region: account.region,
+        })
+      : `https://iaas.${account.region}.oci.oraclecloud.com`;
+  return `${String(base).replace(/\/+$/, "")}/20160918/instances`;
+}
+
+function createRouter({
+  settingsStore,
+  apiBase,
+  publicDir,
+  oracleEndpointResolver,
+}) {
   return async function route(request, response) {
     const url = new URL(request.url, "http://localhost");
     const { pathname } = url;
@@ -835,7 +1089,7 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
       sendJson(response, 200, {
         ...settingsStore.getPublicSettings(),
         apiBase: apiBase || DEFAULT_API_BASE,
-        version: "1.0.0",
+        version: "1.1.0",
       });
       return;
     }
@@ -966,6 +1220,72 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
       return;
     }
 
+    if (
+      pathname === "/api/settings/oracle-accounts" &&
+      request.method === "POST"
+    ) {
+      const body = await readJsonBody(request);
+      const normalized = normalizeOracleAccountInput(body);
+      const proxy = settingsStore.getProxyConfig();
+      const verification = await verifyOracleAccount({
+        account: {
+          ...normalized,
+          label: normalized.label || `Oracle · ${normalized.region}`,
+        },
+        proxy,
+        endpointResolver: oracleEndpointResolver,
+      });
+      const accountId = settingsStore.addOracleAccount({
+        label: normalized.label,
+        tenancyId: normalized.tenancyId,
+        userId: normalized.userId,
+        fingerprint: normalized.fingerprint,
+        region: normalized.region,
+        compartmentId: normalized.compartmentId,
+        privateKey: normalized.privateKey,
+        accountLabel: `Oracle · ${normalized.region}`,
+      });
+      sendJson(response, 201, {
+        ok: true,
+        accountId,
+        verification,
+        settings: settingsStore.getPublicSettings(),
+      });
+      return;
+    }
+
+    const oracleTestMatch = pathname.match(
+      /^\/api\/settings\/oracle-accounts\/([0-9a-f-]+)\/test$/,
+    );
+    if (oracleTestMatch && request.method === "POST") {
+      const account = settingsStore.getOracleAccountById(oracleTestMatch[1]);
+      const proxy = settingsStore.getProxyConfig();
+      const verification = await verifyOracleAccount({
+        account,
+        proxy,
+        endpointResolver: oracleEndpointResolver,
+      });
+      settingsStore.recordOracleVerification(account.id);
+      sendJson(response, 200, {
+        ok: true,
+        verification,
+        settings: settingsStore.getPublicSettings(),
+      });
+      return;
+    }
+
+    const oracleDeleteMatch = pathname.match(
+      /^\/api\/settings\/oracle-accounts\/([0-9a-f-]+)$/,
+    );
+    if (oracleDeleteMatch && request.method === "DELETE") {
+      settingsStore.removeOracleAccount(oracleDeleteMatch[1]);
+      sendJson(response, 200, {
+        ok: true,
+        settings: settingsStore.getPublicSettings(),
+      });
+      return;
+    }
+
     if (pathname === "/api/settings/proxy" && request.method === "PUT") {
       const body = await readJsonBody(request);
       const draft = buildProxyDraft(settingsStore, body, {
@@ -992,7 +1312,13 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
     ) {
       const body = await readJsonBody(request);
       const draft = buildProxyDraft(settingsStore, body);
-      const result = await probeUrl(`${apiBase}/regions`, {
+      const oracleAccounts = settingsStore.getOracleAccounts();
+      const linodeCredentials = settingsStore.getCredentials();
+      const probeTarget =
+        linodeCredentials.length === 0 && oracleAccounts.length > 0
+          ? oracleComputeProbeUrl(oracleAccounts[0], oracleEndpointResolver)
+          : `${apiBase}/regions`;
+      const result = await probeUrl(probeTarget, {
         proxy: draft,
         timeoutMs: 20_000,
       });
@@ -1002,8 +1328,8 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
         latencyMs: result.latencyMs,
         message:
           result.statusCode < 500
-            ? "SOCKS 代理已连通 Linode API。"
-            : `代理已连通，但 Linode API 返回 HTTP ${result.statusCode}。`,
+            ? "SOCKS 代理已连通云 API 端点。"
+            : `代理已连通，但 API 端点返回 HTTP ${result.statusCode}。`,
       });
       return;
     }
@@ -1013,17 +1339,31 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
       request.method === "POST"
     ) {
       const credentials = settingsStore.getCredentials();
+      const oracleAccounts = settingsStore.getOracleAccounts();
       const proxy = settingsStore.getProxyConfig();
       const checks = {
         proxy: { enabled: proxy.enabled, ok: true, message: "未启用代理" },
         token: { ok: false, message: "尚未配置 API 令牌" },
         tokens: [],
+        oracle: {
+          configured: false,
+          ok: true,
+          message: "尚未配置 Oracle Cloud 账户",
+        },
+        oracles: [],
         ok: false,
       };
 
       if (proxy.enabled) {
         try {
-          const probe = await probeUrl(`${apiBase}/regions`, {
+          const probeTarget =
+            credentials.length === 0 && oracleAccounts.length > 0
+              ? oracleComputeProbeUrl(
+                  oracleAccounts[0],
+                  oracleEndpointResolver,
+                )
+              : `${apiBase}/regions`;
+          const probe = await probeUrl(probeTarget, {
             proxy,
             timeoutMs: 20_000,
           });
@@ -1093,21 +1433,85 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
         };
       }
 
-      checks.ok = checks.token.ok && checks.proxy.ok;
+      checks.oracles = await Promise.all(
+        oracleAccounts.map(async (account) => {
+          try {
+            const verification = await verifyOracleAccount({
+              account,
+              proxy,
+              endpointResolver: oracleEndpointResolver,
+            });
+            return {
+              accountId: account.id,
+              ok: true,
+              label: account.label,
+              latencyMs: verification.latencyMs,
+              region: account.region,
+              message: "OCI 请求签名与实例读取验证通过",
+            };
+          } catch (error) {
+            return {
+              accountId: account.id,
+              ok: false,
+              label: account.label,
+              region: account.region,
+              message: error.message || "Oracle Cloud 账户验证失败",
+            };
+          }
+        }),
+      );
+      if (checks.oracles.length > 0) {
+        const okCount = checks.oracles.filter((account) => account.ok).length;
+        checks.oracle = {
+          configured: true,
+          ok: okCount === checks.oracles.length,
+          label: `${checks.oracles.length} 个 Oracle 账户`,
+          okCount,
+          total: checks.oracles.length,
+          latencyMs: Math.max(
+            ...checks.oracles.map((account) => account.latencyMs || 0),
+          ),
+          message:
+            okCount === checks.oracles.length
+              ? `${okCount} 个 Oracle Cloud 账户全部验证通过`
+              : `${okCount}/${checks.oracles.length} 个 Oracle Cloud 账户可用`,
+        };
+      }
+
+      const hasProvider =
+        checks.tokens.length > 0 || checks.oracles.length > 0;
+      const providersOk =
+        (checks.tokens.length === 0 || checks.token.ok === true) &&
+        (checks.oracles.length === 0 || checks.oracle.ok === true);
+      checks.ok = checks.proxy.ok && hasProvider && providersOk;
       checks.checkedAt = new Date().toISOString();
       sendJson(response, 200, checks);
       return;
     }
 
     const proxy = settingsStore.getProxyConfig();
-    const entries = credentialEntries(settingsStore, apiBase, proxy);
+    const entries = optionalCredentialEntries(settingsStore, apiBase, proxy);
+    const oracleEntries = optionalOracleEntries(
+      settingsStore,
+      proxy,
+      oracleEndpointResolver,
+    );
+    const hasConfiguredCredentials =
+      entries.length > 0 || oracleEntries.length > 0;
 
     if (pathname === "/api/overview") {
       if (request.method !== "GET") {
         methodNotAllowed(response, ["GET"]);
         return;
       }
-      sendJson(response, 200, await buildOverview(entries));
+      if (!hasConfiguredCredentials) {
+        throw new HttpError(
+          401,
+          "Connect a Linode API token or Oracle Cloud account to continue.",
+          "TOKEN_REQUIRED",
+        );
+      }
+      sendJson(response, 200, await buildOverview(entries, oracleEntries));
       return;
     }
 
@@ -1127,7 +1531,18 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
 
     if (pathname === "/api/instances") {
       if (request.method === "GET") {
-        sendJson(response, 200, await listAggregateInstances(entries));
+        if (!hasConfiguredCredentials) {
+          throw new HttpError(
+            401,
+            "Connect a Linode API token or Oracle Cloud account to continue.",
+            "TOKEN_REQUIRED",
+          );
+        }
+        sendJson(
+          response,
+          200,
+          await listAggregateInstances(entries, oracleEntries),
+        );
         return;
       }
       if (request.method === "POST") {
@@ -1147,6 +1562,163 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
         return;
       }
       methodNotAllowed(response, ["GET", "POST"]);
+      return;
+    }
+
+    if (pathname === "/api/oracle/instances") {
+      if (request.method !== "GET") {
+        methodNotAllowed(response, ["GET"]);
+        return;
+      }
+      if (oracleEntries.length === 0) {
+        throw new HttpError(
+          401,
+          "Connect an Oracle Cloud account to continue.",
+          "ORACLE_ACCOUNT_REQUIRED",
+        );
+      }
+
+      const accountId = cleanString(url.searchParams.get("accountId"), {
+        maxLength: 128,
+      });
+      const selected = accountId
+        ? oracleEntries.filter((entry) => entry.account.id === accountId)
+        : oracleEntries;
+      if (selected.length === 0) {
+        throw new HttpError(
+          404,
+          "The selected Oracle Cloud account does not exist.",
+          "ORACLE_ACCOUNT_NOT_FOUND",
+        );
+      }
+
+      const slices = await Promise.all(
+        selected.map(async ({ account, client }) => {
+          try {
+            const instances = await client.listInstances();
+            return {
+              instances: instances.map((instance) =>
+                annotateOracleInstance(instance, account),
+              ),
+              error: null,
+            };
+          } catch (error) {
+            return {
+              instances: [],
+              error: `${account.label}: ${errorMessage(error)}`,
+            };
+          }
+        }),
+      );
+      sendJson(response, 200, {
+        data: slices.flatMap((slice) => slice.instances),
+        errors: slices.map((slice) => slice.error).filter(Boolean),
+      });
+      return;
+    }
+
+    const oracleDetailMatch = pathname.match(
+      /^\/api\/oracle\/instances\/([^/]+)\/detail$/,
+    );
+    if (oracleDetailMatch) {
+      if (request.method !== "GET") {
+        methodNotAllowed(response, ["GET"]);
+        return;
+      }
+      const instanceId = oracleDetailMatch[1];
+      if (!isOracleInstanceId(instanceId)) {
+        throw new HttpError(
+          400,
+          "Invalid Oracle instance OCID.",
+          "INVALID_ORACLE_INSTANCE_ID",
+        );
+      }
+      const target = await resolveOracleTarget(
+        settingsStore,
+        proxy,
+        instanceId,
+        url.searchParams.get("accountId"),
+        oracleEndpointResolver,
+      );
+      sendJson(response, 200, await buildOracleDetail(target));
+      return;
+    }
+
+    const oracleActionMatch = pathname.match(
+      /^\/api\/oracle\/instances\/([^/]+)\/actions\/([a-z-]+)$/,
+    );
+    if (oracleActionMatch) {
+      if (request.method !== "POST") {
+        methodNotAllowed(response, ["POST"]);
+        return;
+      }
+      const instanceId = oracleActionMatch[1];
+      if (!isOracleInstanceId(instanceId)) {
+        throw new HttpError(
+          400,
+          "Invalid Oracle instance OCID.",
+          "INVALID_ORACLE_INSTANCE_ID",
+        );
+      }
+      const operation = oracleActionMatch[2];
+      const actionMap = {
+        boot: "START",
+        shutdown: "STOP",
+        reboot: "RESET",
+      };
+      const oracleAction = actionMap[operation];
+      if (!oracleAction) {
+        throw new HttpError(
+          400,
+          `Unsupported Oracle instance action: ${operation}`,
+          "UNSUPPORTED_ACTION",
+        );
+      }
+      const target = await resolveOracleTarget(
+        settingsStore,
+        proxy,
+        instanceId,
+        url.searchParams.get("accountId"),
+        oracleEndpointResolver,
+      );
+      const result = await target.client.invokeAction(
+        instanceId,
+        oracleAction,
+      );
+      sendJson(response, 200, {
+        ok: true,
+        provider: "oracle",
+        action: operation,
+        oracleAction,
+        result: result ? annotateOracleInstance(result, target.account) : null,
+      });
+      return;
+    }
+
+    const oracleInstanceMatch = pathname.match(
+      /^\/api\/oracle\/instances\/([^/]+)$/,
+    );
+    if (oracleInstanceMatch) {
+      if (request.method !== "GET") {
+        methodNotAllowed(response, ["GET"]);
+        return;
+      }
+      const instanceId = oracleInstanceMatch[1];
+      if (!isOracleInstanceId(instanceId)) {
+        throw new HttpError(
+          400,
+          "Invalid Oracle instance OCID.",
+          "INVALID_ORACLE_INSTANCE_ID",
+        );
+      }
+      const target = await resolveOracleTarget(
+        settingsStore,
+        proxy,
+        instanceId,
+        url.searchParams.get("accountId"),
+        oracleEndpointResolver,
+      );
+      sendJson(response, 200, target.instance);
       return;
     }
 
@@ -1407,13 +1979,13 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
           );
         }
 
-        let newAddress = "";
+        let newAddress;
         try {
           const allocation = await target.client.request(
-            "/networking/reserved/ips",
+            `/linode/instances/${instanceId}/ips`,
             {
               method: "POST",
-              body: { region: instance.region },
+              body: { type: "ipv4", public: true },
             },
           );
           newAddress = cleanString(allocation?.address, { maxLength: 64 });
@@ -1424,72 +1996,19 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
               "IPV4_ALLOCATION_FAILED",
             );
           }
-
-          await target.client.request("/networking/ips/assign", {
-            method: "POST",
-            body: {
-              region: instance.region,
-              assignments: [
-                {
-                  address: newAddress,
-                  linode_id: Number(instanceId),
-                },
-              ],
-            },
-          });
         } catch (error) {
-          let cleanupError = null;
-          if (newAddress) {
-            try {
-              await target.client.request(
-                `/networking/reserved/ips/${encodeURIComponent(newAddress)}`,
-                { method: "DELETE" },
-              );
-            } catch (rollbackError) {
-              cleanupError = rollbackError;
-            }
+          if (error instanceof HttpError) {
+            throw error;
           }
-          if (cleanupError) {
-            throw new HttpError(
-              502,
-              `新的 IPv4 ${newAddress} 未能绑定到实例，且自动释放该 Reserved IP 也失败：${ipOperationErrorMessage(cleanupError)}。请在 Linode 控制台手动删除该地址，避免持续计费。原始错误：${ipOperationErrorMessage(error)}`,
-              "IPV4_ASSIGN_CLEANUP_FAILED",
-              ipOperationErrorDetails(error),
-            );
-          }
-          throw error;
+          throw new HttpError(
+            502,
+            `未能为实例分配新的公网 IPv4：${ipOperationErrorMessage(error)}。Akamai 要求账户具备额外 IPv4 配额，通常需先提交支持工单；额外 IPv4 会单独计费。旧地址未删除。`,
+            "IPV4_ALLOCATION_FAILED",
+            ipOperationErrorDetails(error),
+          );
         }
 
         const warnings = [];
-        try {
-          await target.client.request(
-            `/networking/ips/${encodeURIComponent(newAddress)}`,
-            {
-              method: "PUT",
-              body: { reserved: false },
-            },
-          );
-        } catch (error) {
-          warnings.push(
-            `新 IPv4 ${newAddress} 已绑定到实例，但未能取消 Reserved 状态：${ipOperationErrorMessage(error)}。该地址可能继续产生保留 IP 费用。`,
-          );
-        }
-
-        if (oldRecord.reserved === true) {
-          try {
-            await target.client.request(
-              `/networking/ips/${encodeURIComponent(oldAddress)}`,
-              {
-                method: "PUT",
-                body: { reserved: false },
-              },
-            );
-          } catch (error) {
-            warnings.push(
-              `旧 Reserved IPv4 ${oldAddress} 未能取消保留状态：${ipOperationErrorMessage(error)}。`,
-            );
-          }
-        }
 
         let requiresManualCleanup = false;
         try {
@@ -1500,7 +2019,7 @@ function createRouter({ settingsStore, apiBase, publicDir }) {
         } catch (error) {
           requiresManualCleanup = true;
           warnings.push(
-            `旧 IPv4 ${oldAddress} 未能自动释放：${ipOperationErrorMessage(error)}。请在 Linode 控制台手动清理，避免继续占用配额或计费。`,
+            `新 IPv4 ${newAddress} 已分配到实例，但旧地址 ${oldAddress} 未能自动释放：${ipOperationErrorMessage(error)}。两个公网 IPv4 会短暂并存，多出的地址可能继续计费；请在 Akamai 控制台手动释放旧地址。`,
           );
         }
 
@@ -1674,6 +2193,15 @@ function formatError(error) {
     };
   }
 
+  if (error instanceof OracleError) {
+    return {
+      status: error.status,
+      code: error.code || "ORACLE_API_ERROR",
+      message: error.message,
+      details: error.details,
+    };
+  }
+
   if (error instanceof SettingsStoreError) {
     return {
       status: error.status,
@@ -1695,12 +2223,18 @@ export function createRequestHandler({
   settingsStore,
   apiBase = DEFAULT_API_BASE,
   publicDir = DEFAULT_PUBLIC_DIR,
+  oracleEndpointResolver = null,
   logger = console,
 } = {}) {
   if (!settingsStore) {
     throw new Error("A settingsStore instance is required.");
   }
-  const route = createRouter({ settingsStore, apiBase, publicDir });
+  const route = createRouter({
+    settingsStore,
+    apiBase,
+    publicDir,
+    oracleEndpointResolver,
+  });
 
   return async function handler(request, response) {
     const startedAt = performance.now();

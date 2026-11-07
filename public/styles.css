@@ -3647,6 +3647,87 @@ code {
   text-underline-offset: 3px;
 }
 
+.provider-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  color: var(--text-3);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.provider-chip.is-compact {
+  height: 16px;
+  padding: 0 4px;
+  font-size: 7px;
+}
+
+.provider-oracle {
+  border-color: rgba(248, 113, 113, 0.24);
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.07);
+}
+
+.provider-linode {
+  border-color: rgba(96, 165, 250, 0.2);
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.panel-empty-onboarding {
+  display: flex;
+  align-items: flex-start;
+  gap: 18px;
+  padding: 28px;
+}
+
+.panel-empty-onboarding h2 {
+  margin: 4px 0 8px;
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.panel-empty-onboarding p {
+  max-width: 680px;
+  margin: 0 0 18px;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.detail-meta-grid > .detail-span-two {
+  grid-column: 1 / -1;
+}
+
+.resource-link.resource-link-inline {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.modal-oracle .form-field textarea {
+  min-height: 150px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+@media (max-width: 680px) {
+  .panel-empty-onboarding {
+    flex-direction: column;
+    padding: 20px;
+  }
+}
+
 /* Connect and failure states */
 
 .page-disconnected,

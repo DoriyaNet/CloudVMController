@@ -17,6 +17,14 @@ export function createApi({ onUnauthorized } = {}) {
     return `${path}${separator}tokenId=${encodeURIComponent(tokenId)}`;
   }
 
+  function withQuery(path, key, value) {
+    if (!value) {
+      return path;
+    }
+    const separator = path.includes("?") ? "&" : "?";
+    return `${path}${separator}${key}=${encodeURIComponent(value)}`;
+  }
+
   async function request(
     path,
     { method = "GET", body, signal, skipUnauthorized = false } = {},
@@ -101,6 +109,21 @@ export function createApi({ onUnauthorized } = {}) {
       request(`/settings/tokens/${encodeURIComponent(id)}`, {
         method: "DELETE",
       }),
+    addOracleAccount: (payload) =>
+      request("/settings/oracle-accounts", {
+        method: "POST",
+        body: payload,
+        skipUnauthorized: true,
+      }),
+    testOracleAccount: (id) =>
+      request(`/settings/oracle-accounts/${encodeURIComponent(id)}/test`, {
+        method: "POST",
+        skipUnauthorized: true,
+      }),
+    deleteOracleAccount: (id) =>
+      request(`/settings/oracle-accounts/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      }),
     saveProxy: (payload) =>
       request("/settings/proxy", { method: "PUT", body: payload }),
     testProxy: (payload) =>
@@ -118,6 +141,18 @@ export function createApi({ onUnauthorized } = {}) {
         ...options,
         skipUnauthorized: true,
       }),
+    oracleDetail: (id, accountId, options) =>
+      request(
+        withQuery(
+          `/oracle/instances/${encodeURIComponent(id)}/detail`,
+          "accountId",
+          accountId,
+        ),
+        {
+          ...options,
+          skipUnauthorized: true,
+        },
+      ),
     instanceIps: (id, tokenId, options) =>
       request(withTokenQuery(`/instances/${id}/ips`, tokenId), {
         ...options,
@@ -154,6 +189,18 @@ export function createApi({ onUnauthorized } = {}) {
         method: "POST",
         skipUnauthorized: true,
       }),
+    oracleAction: (id, action, accountId) =>
+      request(
+        withQuery(
+          `/oracle/instances/${encodeURIComponent(id)}/actions/${action}`,
+          "accountId",
+          accountId,
+        ),
+        {
+          method: "POST",
+          skipUnauthorized: true,
+        },
+      ),
     remove: (id, tokenId) =>
       request(withTokenQuery(`/instances/${id}`, tokenId), {
         method: "DELETE",

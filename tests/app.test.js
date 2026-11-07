@@ -9,6 +9,7 @@ import { createRequestHandler } from "../server/app.js";
 import { openSettingsStore } from "../server/settings-store.js";
 import {
   renderCreate,
+  renderCreateUnavailable,
   renderDrawer,
   renderIpRenewModal,
   renderIpSwapModal,
@@ -17,6 +18,7 @@ import {
   renderSettings,
 } from "../public/js/views.js";
 import { createMockLinode } from "./helpers/mock-linode.js";
+import { createMockOracle } from "./helpers/mock-oracle.js";
 import { createSocks5Server } from "./helpers/socks5-server.js";
 
 async function listen(server) {
@@ -24,8 +26,9 @@ async function listen(server) {
   return server.address();
 }
 
-async function startStack({ envToken } = {}) {
+async function startStack({ envToken, withOracle = false } = {}) {
   const mock = await createMockLinode();
+  const oracle = withOracle ? await createMockOracle() : null;
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "linode-pilot-test-"));
   const settingsStore = openSettingsStore({
     dataDir,
@@ -34,6 +37,7 @@ async function startStack({ envToken } = {}) {
   const handler = createRequestHandler({
     settingsStore,
     apiBase: mock.apiBase,
+    oracleEndpointResolver: oracle?.endpointResolver || null,
     logger: { info() {}, error() {} },
   });
   const server = http.createServer(handler);
@@ -41,12 +45,14 @@ async function startStack({ envToken } = {}) {
 
   return {
     mock,
+    oracle,
     settingsStore,
     dataDir,
     baseUrl: `http://127.0.0.1:${address.port}`,
     async close() {
       await new Promise((resolve) => server.close(resolve));
       await mock.close();
+      await oracle?.close();
       rmSync(dataDir, { recursive: true, force: true });
     },
   };
@@ -306,7 +312,7 @@ test("renders multi-account views with account filtering and create selector", a
   };
 
   const overviewHtml = renderOverview(state);
-  assert.match(overviewHtml, /2 个账户同时工作/);
+  assert.match(overviewHtml, /2 个云账户同时工作/);
   assert.match(overviewHtml, /Orbit Works|Rina Sato/);
 
   const instancesHtml = renderInstances(state);
@@ -815,24 +821,13 @@ test("renews a public IPv4 address and releases the old address", async (t) => {
   const addresses = rawIps.ipv4.public.map((entry) => entry.address);
   assert.equal(addresses.includes("172.104.55.21"), false);
   assert.equal(addresses.includes("172.104.90.10"), true);
-  assert.equal(
-    rawIps.ipv4.public.find(
-      (entry) => entry.address === "172.104.90.10",
-    ).reserved,
-    false,
-  );
 
-  const reserveRequest = stack.mock.requests.find(
+  const allocationRequest = stack.mock.requests.find(
     (entry) =>
-      entry.method === "POST" && entry.path === "/networking/reserved/ips",
+      entry.method === "POST" &&
+      entry.path === "/linode/instances/58120442/ips",
   );
-  assert.deepEqual(reserveRequest.body, { region: "ap-south" });
-  const unreserveRequest = stack.mock.requests.find(
-    (entry) =>
-      entry.method === "PUT" &&
-      entry.path === "/networking/ips/172.104.90.10",
-  );
-  assert.deepEqual(unreserveRequest.body, { reserved: false });
+  assert.deepEqual(allocationRequest.body, { type: "ipv4", public: true });
   assert.ok(
     stack.mock.requests.some(
       (entry) =>
@@ -840,6 +835,12 @@ test("renews a public IPv4 address and releases the old address", async (t) => {
         entry.path ===
           "/linode/instances/58120442/ips/172.104.55.21",
     ),
+  );
+  assert.equal(
+    stack.mock.requests.some((entry) =>
+      entry.path.startsWith("/networking/reserved/"),
+    ),
+    false,
   );
 });
 
@@ -925,7 +926,8 @@ test("keeps the new IPv4 and warns when old address cleanup fails", async (t) =>
   assert.equal(result.newAddress, "172.104.90.10");
   assert.equal(result.requiresManualCleanup, true);
   assert.equal(result.warnings.length, 1);
-  assert.match(result.warnings[0], /旧 IPv4 172\.104\.55\.21 未能自动释放/);
+  assert.match(result.warnings[0], /新 IPv4 172\.104\.90\.10 已分配到实例/);
+  assert.match(result.warnings[0], /旧地址 172\.104\.55\.21 未能自动释放/);
 
   const rawIps = await fetch(
     `${stack.mock.apiBase}/linode/instances/58120442/ips`,
@@ -938,11 +940,10 @@ test("keeps the new IPv4 and warns when old address cleanup fails", async (t) =>
   assert.equal(addresses.includes("172.104.55.21"), true);
 });
 
-test("reports when a failed IPv4 assignment cannot roll back its reservation", async (t) => {
+test("keeps the old IPv4 when no additional address can be allocated", async (t) => {
   const stack = await startStack();
   t.after(() => stack.close());
-  stack.mock.setFailNextIpv4Assign();
-  stack.mock.setFailNextReservedDelete();
+  stack.mock.setFailNextIpv4Create();
 
   const response = await fetch(
     `${stack.baseUrl}/api/instances/58120442/ip-renew`,
@@ -958,15 +959,27 @@ test("reports when a failed IPv4 assignment cannot roll back its reservation", a
   const payload = await response.json();
 
   assert.equal(response.status, 502);
-  assert.equal(payload.code, "IPV4_ASSIGN_CLEANUP_FAILED");
-  assert.match(payload.error, /172\.104\.90\.10/);
-  assert.match(payload.error, /手动删除/);
-  assert.ok(
+  assert.equal(payload.code, "IPV4_ALLOCATION_FAILED");
+  assert.match(payload.error, /额外 IPv4/);
+  assert.match(payload.error, /旧地址未删除/);
+  assert.equal(
     stack.mock.requests.some(
       (entry) =>
         entry.method === "DELETE" &&
-        entry.path === "/networking/reserved/ips/172.104.90.10",
+        entry.path === "/linode/instances/58120442/ips/172.104.55.21",
     ),
+    false,
+  );
+
+  const rawIps = await fetch(
+    `${stack.mock.apiBase}/linode/instances/58120442/ips`,
+    {
+      headers: { Authorization: `Bearer ${stack.mock.token}` },
+    },
+  ).then((entry) => entry.json());
+  assert.deepEqual(
+    rawIps.ipv4.public.map((entry) => entry.address),
+    ["172.104.55.21"],
   );
 });
 
@@ -993,7 +1006,8 @@ test("rejects IP renewal while the instance is transitional", async (t) => {
   assert.equal(
     stack.mock.requests.some(
       (entry) =>
-        entry.method === "POST" && entry.path === "/networking/reserved/ips",
+        entry.method === "POST" &&
+        entry.path === "/linode/instances/58120442/ips",
     ),
     false,
   );
@@ -1098,7 +1112,8 @@ test("rejects IPv4 renewal when the instance has no public IPv4", async (t) => {
   assert.equal(
     stack.mock.requests.some(
       (entry) =>
-        entry.method === "POST" && entry.path === "/networking/reserved/ips",
+        entry.method === "POST" &&
+        entry.path === "/linode/instances/58120442/ips",
     ),
     false,
   );
@@ -1190,6 +1205,8 @@ test("renders the IP swap modal and routed IPv6 ranges in the drawer", () => {
   assert.match(drawer, /data-action="open-ip-renew"/);
   assert.match(drawer, /2400:8907:aa01::\/64/);
   assert.match(drawer, /IPv6 段/);
+  assert.match(drawer, /路由段前缀不能直接 ping/);
+  assert.match(drawer, /Network Helper 开启时重启可能覆盖手工配置/);
 
   const modal = renderIpSwapModal({
     modal: {
@@ -1249,7 +1266,8 @@ test("renders IPv4, IPv6 /56, and unavailable renewal states", () => {
   assert.match(ipv4, /id="ip-renew-form"/);
   assert.match(ipv4, /172\.104\.55\.21/);
   assert.match(ipv4, /申请新 IPv4/);
-  assert.match(ipv4, /Reserved IP/);
+  assert.match(ipv4, /额外公网 IPv4/);
+  assert.match(ipv4, /分配失败时不会删除旧地址/);
   assert.match(
     ipv4,
     /<button type="submit" class="button button-primary" disabled>/,
@@ -1270,6 +1288,9 @@ test("renders IPv4, IPv6 /56, and unavailable renewal states", () => {
   assert.match(ipv6, /默认 SLAAC/);
   assert.match(ipv6, /不可变/);
   assert.match(ipv6, /先释放当前路由段/);
+  assert.match(ipv6, /不会自动把段内地址配置进系统/);
+  assert.match(ipv6, /Network Helper/);
+  assert.match(ipv6, /IPv6 路由段不单独计费/);
   assert.match(ipv6, /正在换新/);
   assert.match(ipv6, /data-action="close-modal"[^>]*disabled/);
 
@@ -1280,4 +1301,397 @@ test("renders IPv4, IPv6 /56, and unavailable renewal states", () => {
     },
   });
   assert.match(unavailable, /无法执行 IPv4 换新/);
+});
+
+test("verifies Oracle signatures, stores OCI keys encrypted, and controls instances", async (t) => {
+  const stack = await startStack({ envToken: "", withOracle: true });
+  t.after(() => stack.close());
+  const headers = {
+    "Content-Type": "application/json",
+    "X-CloudVMController": "1",
+  };
+
+  const before = await fetch(`${stack.baseUrl}/api/overview`);
+  assert.equal(before.status, 401);
+
+  const created = await fetch(
+    `${stack.baseUrl}/api/settings/oracle-accounts`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        label: "OCI Production",
+        tenancyId: stack.oracle.tenancyId,
+        userId: stack.oracle.userId,
+        fingerprint: stack.oracle.fingerprint,
+        region: "us-ashburn-1",
+        privateKey: stack.oracle.privateKey,
+      }),
+    },
+  );
+  const createdPayload = await created.json();
+  assert.equal(created.status, 201);
+  assert.equal(createdPayload.ok, true);
+  assert.equal(createdPayload.settings.oracleConfigured, true);
+  assert.equal(createdPayload.settings.oracleAccounts.length, 1);
+  assert.equal(
+    createdPayload.settings.oracleAccounts[0].label,
+    "OCI Production",
+  );
+  assert.equal(
+    "privateKey" in createdPayload.settings.oracleAccounts[0],
+    false,
+  );
+  assert.equal(
+    JSON.stringify(createdPayload.settings).includes("BEGIN PRIVATE KEY"),
+    false,
+  );
+  assert.equal(stack.oracle.invalidSignatures, 0);
+  assert.ok(stack.oracle.requests.every((entry) => entry.signatureValid));
+
+  const stored = JSON.parse(
+    readFileSync(path.join(stack.dataDir, "settings.json"), "utf8"),
+  );
+  assert.equal(stored.oracleAccounts.length, 1);
+  assert.ok(stored.oracleAccounts[0].encryptedPrivateKey);
+  assert.equal(
+    JSON.stringify(stored).includes("BEGIN PRIVATE KEY"),
+    false,
+  );
+
+  const duplicate = await fetch(
+    `${stack.baseUrl}/api/settings/oracle-accounts`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        label: "Duplicate",
+        tenancyId: stack.oracle.tenancyId,
+        userId: stack.oracle.userId,
+        fingerprint: stack.oracle.fingerprint,
+        region: "us-ashburn-1",
+        privateKey: stack.oracle.privateKey,
+      }),
+    },
+  );
+  assert.equal(duplicate.status, 409);
+
+  const overview = await fetch(`${stack.baseUrl}/api/overview`);
+  const overviewPayload = await overview.json();
+  assert.equal(overview.status, 200);
+  assert.equal(overviewPayload.poolSize, 1);
+  assert.equal(overviewPayload.accounts.length, 1);
+  assert.equal(overviewPayload.accounts[0].provider, "oracle");
+  assert.equal(overviewPayload.accounts[0].instanceCount, 2);
+  assert.equal(overviewPayload.instances.length, 2);
+  assert.ok(
+    overviewPayload.instances.every(
+      (instance) => instance.provider === "oracle",
+    ),
+  );
+  const running = overviewPayload.instances.find(
+    (instance) => instance.label === "oracle-edge",
+  );
+  assert.equal(running.status, "running");
+  assert.equal(running.specs.ocpus, 2);
+  assert.deepEqual(running.tags, ["role", "env"]);
+  assert.equal(stack.oracle.invalidSignatures, 0);
+  assert.ok(
+    stack.oracle.requests.some(
+      (entry) =>
+        entry.method === "GET" &&
+        entry.path === "/20160918/compartments" &&
+        entry.signatureValid,
+    ),
+  );
+
+  const accountId = createdPayload.accountId;
+  const detail = await fetch(
+    `${stack.baseUrl}/api/oracle/instances/${encodeURIComponent(running.id)}/detail?accountId=${accountId}`,
+  );
+  const detailPayload = await detail.json();
+  assert.equal(detail.status, 200);
+  assert.equal(detailPayload.provider, "oracle");
+  assert.equal(detailPayload.ips.publicIpv4, "129.146.88.42");
+  assert.equal(detailPayload.ips.privateIpv4, "10.0.1.25");
+  assert.equal(detailPayload.ips.ipv6, "2603:c020:8002:abcd::25");
+
+  const shutdown = await fetch(
+    `${stack.baseUrl}/api/oracle/instances/${encodeURIComponent(running.id)}/actions/shutdown?accountId=${accountId}`,
+    {
+      method: "POST",
+      headers: { "X-CloudVMController": "1" },
+    },
+  );
+  assert.equal(shutdown.status, 200);
+  assert.equal(
+    stack.oracle.instances.find((entry) => entry.id === running.id)
+      .lifecycleState,
+    "STOPPED",
+  );
+
+  const afterShutdown = await fetch(`${stack.baseUrl}/api/overview`).then(
+    (response) => response.json(),
+  );
+  assert.equal(
+    afterShutdown.instances.find((entry) => entry.id === running.id).status,
+    "offline",
+  );
+
+  const boot = await fetch(
+    `${stack.baseUrl}/api/oracle/instances/${encodeURIComponent(running.id)}/actions/boot?accountId=${accountId}`,
+    {
+      method: "POST",
+      headers: { "X-CloudVMController": "1" },
+    },
+  );
+  assert.equal(boot.status, 200);
+  assert.equal(
+    stack.oracle.instances.find((entry) => entry.id === running.id)
+      .lifecycleState,
+    "RUNNING",
+  );
+
+  const testConnection = await fetch(
+    `${stack.baseUrl}/api/settings/test-connection`,
+    {
+      method: "POST",
+      headers: { "X-CloudVMController": "1" },
+    },
+  ).then((response) => response.json());
+  assert.equal(testConnection.ok, true);
+  assert.equal(testConnection.oracle.ok, true);
+  assert.equal(testConnection.oracles.length, 1);
+
+  const remove = await fetch(
+    `${stack.baseUrl}/api/settings/oracle-accounts/${accountId}`,
+    {
+      method: "DELETE",
+      headers: { "X-CloudVMController": "1" },
+    },
+  );
+  const removed = await remove.json();
+  assert.equal(remove.status, 200);
+  assert.equal(removed.settings.oracleConfigured, false);
+  assert.equal((await fetch(`${stack.baseUrl}/api/overview`)).status, 401);
+  assert.equal(stack.oracle.invalidSignatures, 0);
+});
+
+test("rejects invalid Oracle credentials before storing them", async (t) => {
+  const stack = await startStack({ envToken: "", withOracle: true });
+  t.after(() => stack.close());
+
+  const response = await fetch(
+    `${stack.baseUrl}/api/settings/oracle-accounts`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CloudVMController": "1",
+      },
+      body: JSON.stringify({
+        label: "Broken",
+        tenancyId: stack.oracle.tenancyId,
+        userId: stack.oracle.userId,
+        fingerprint: "not-a-fingerprint",
+        region: "us-ashburn-1",
+        privateKey: stack.oracle.privateKey,
+      }),
+    },
+  );
+  const payload = await response.json();
+  assert.equal(response.status, 400);
+  assert.equal(payload.code, "INVALID_ORACLE_CONFIG");
+  assert.equal(stack.settingsStore.getPublicSettings().oracleConfigured, false);
+});
+
+test("aggregates Linode and Oracle instances in one control plane", async (t) => {
+  const stack = await startStack({ withOracle: true });
+  t.after(() => stack.close());
+
+  const created = await fetch(
+    `${stack.baseUrl}/api/settings/oracle-accounts`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CloudVMController": "1",
+      },
+      body: JSON.stringify({
+        label: "OCI Shared",
+        tenancyId: stack.oracle.tenancyId,
+        userId: stack.oracle.userId,
+        fingerprint: stack.oracle.fingerprint,
+        region: "us-ashburn-1",
+        privateKey: stack.oracle.privateKey,
+      }),
+    },
+  );
+  assert.equal(created.status, 201);
+
+  const overview = await fetch(`${stack.baseUrl}/api/overview`).then(
+    (response) => response.json(),
+  );
+  assert.equal(overview.poolSize, 2);
+  assert.equal(overview.accounts.length, 2);
+  assert.deepEqual(
+    overview.accounts.map((account) => account.provider).sort(),
+    ["linode", "oracle"],
+  );
+  assert.equal(
+    overview.instances.length,
+    8,
+  );
+  assert.equal(
+    overview.instances.filter((instance) => instance.provider === "linode")
+      .length,
+    6,
+  );
+  assert.equal(
+    overview.instances.filter((instance) => instance.provider === "oracle")
+      .length,
+    2,
+  );
+  assert.ok(overview.account.balance > 0);
+  assert.ok(overview.events.length > 0);
+
+  const oracleInstance = overview.instances.find(
+    (instance) => instance.provider === "oracle",
+  );
+  const detail = await fetch(
+    `${stack.baseUrl}/api/oracle/instances/${encodeURIComponent(oracleInstance.id)}/detail?accountId=${oracleInstance.accountId}`,
+  );
+  assert.equal(detail.status, 200);
+});
+
+test("renders Oracle instances, details, settings, and deployment boundary", () => {
+  const oracleAccountId = ["oci", "account", "1"].join("-");
+  const instance = {
+    id: "ocid1.instance.oc1.us-ashburn-1.anuwgljroracletest0000000000000000000001",
+    provider: "oracle",
+    providerLabel: "Oracle Cloud",
+    label: "oracle-edge",
+    status: "running",
+    providerStatus: "RUNNING",
+    region: "us-ashburn-1",
+    availabilityDomain: "Uocm:US-ASHBURN-AD-1",
+    compartmentId:
+      "ocid1.compartment.oc1..aaaaaaaarootcompartment00000000000000000000000000001",
+    type: "VM.Standard.A1.Flex",
+    image:
+      "ocid1.image.oc1.us-ashburn-1.aaaaaaaaimage0000000000000000000000000000001",
+    specs: { ocpus: 2, vcpus: null, memory: 12_288, disk: null },
+    created: "2026-10-01T09:30:00.000Z",
+    tags: ["edge", "prod"],
+    ipv4: [],
+    ipv6: "",
+    accountId: oracleAccountId,
+    tokenId: oracleAccountId,
+    tokenLabel: "OCI Production",
+    accountLabel: "OCI Production",
+  };
+  const account = {
+    id: oracleAccountId,
+    tokenId: oracleAccountId,
+    provider: "oracle",
+    providerLabel: "Oracle Cloud",
+    label: "OCI Production",
+    instanceCount: 1,
+    balance: null,
+    error: "",
+    ok: true,
+  };
+  const baseState = {
+    overview: {
+      account: null,
+      accounts: [account],
+      transfer: null,
+      events: [],
+      instances: [instance],
+      poolSize: 1,
+      errors: [],
+    },
+    overviewError: null,
+    filters: { query: "", status: "all", region: "all", account: "all" },
+    catalog: null,
+    busyActions: new Set(),
+    refreshing: false,
+    settings: {
+      tokenConfigured: false,
+      tokens: [],
+      oracleConfigured: true,
+      oracleAccounts: [
+        {
+          id: oracleAccountId,
+          label: "OCI Production",
+          tenancyId:
+            "ocid1.tenancy.oc1..aaaaaaaaoracletesttenant0000000000000000000000000000000001",
+          userId:
+            "ocid1.user.oc1..aaaaaaaauser0000000000000000000000000000000000000000000001",
+          fingerprint: "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
+          region: "us-ashburn-1",
+          compartmentId: "",
+          maskedPrivateKey: "•••••••• RSA KEY",
+          lastVerifiedAt: new Date().toISOString(),
+        },
+      ],
+      proxy: {},
+      envTokenConfigured: false,
+    },
+    prefs: { autoRefresh: true },
+    session: { apiBase: "https://api.linode.com/v4", version: "1.0.0" },
+    detail: {
+      open: true,
+      id: instance.id,
+      tokenId: account.id,
+      provider: "oracle",
+      loading: false,
+      error: null,
+      data: {
+        provider: "oracle",
+        instance,
+        stats: null,
+        backups: null,
+        events: [],
+        ips: {
+          publicIpv4: "129.146.88.42",
+          privateIpv4: "10.0.1.25",
+          ipv6: "2603:c020:8002:abcd::25",
+          publicIpv4s: ["129.146.88.42"],
+          privateIpv4s: ["10.0.1.25"],
+          ipv6s: ["2603:c020:8002:abcd::25"],
+        },
+      },
+    },
+  };
+
+  const list = renderInstances(baseState);
+  assert.match(list, /provider-oracle/);
+  assert.match(list, /data-provider="oracle"/);
+  assert.match(list, /2 OCPU/);
+  assert.doesNotMatch(list, /部署 Linode/);
+
+  const overview = renderOverview(baseState);
+  assert.match(overview, /OCI Production/);
+  assert.match(overview, /Oracle Cloud/);
+  assert.match(overview, /OCI 费用请在 Oracle 控制台查看/);
+
+  const drawer = renderDrawer(baseState);
+  assert.match(drawer, /ORACLE CLOUD INSTANCE/);
+  assert.match(drawer, /129\.146\.88\.42/);
+  assert.match(drawer, /Uocm:US-ASHBURN-AD-1/);
+  assert.match(drawer, /2 OCPU/);
+  assert.match(drawer, /ssh opc@129\.146\.88\.42/);
+  assert.doesNotMatch(drawer, /交换 IP/);
+  assert.doesNotMatch(drawer, /删除实例/);
+
+  const settings = renderSettings(baseState);
+  assert.match(settings, /Oracle Cloud 账户/);
+  assert.match(settings, /添加 OCI 账户/);
+  assert.match(settings, /OCI Production/);
+  assert.doesNotMatch(settings, /BEGIN PRIVATE KEY/);
+
+  const createUnavailable = renderCreateUnavailable(baseState);
+  assert.match(createUnavailable, /Oracle 实例创建尚未开放/);
+  assert.match(createUnavailable, /自动出现在这里/);
 });

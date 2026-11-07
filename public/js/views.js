@@ -54,10 +54,10 @@ export function statusBadge(status, { compact = false } = {}) {
 
 function accountName(account) {
   if (!account) {
-    return "Linode 账户";
+    return "云账户";
   }
   const fullName = [account.first_name, account.last_name].filter(Boolean).join(" ");
-  return fullName || account.company || account.email || "Linode 账户";
+  return fullName || account.company || account.email || "云账户";
 }
 
 function greeting() {
@@ -92,10 +92,17 @@ function accountBadge(instance, { compact = false } = {}) {
   return `<span class="account-chip${compact ? " is-compact" : ""}" title="所属账户">${icon("key")}<span>${escapeHtml(label)}</span></span>`;
 }
 
+function providerBadge(instance, { compact = false } = {}) {
+  const provider = instance?.provider === "oracle" ? "oracle" : "linode";
+  const label = provider === "oracle" ? "OCI" : "LINODE";
+  return `<span class="provider-chip provider-${provider}${compact ? " is-compact" : ""}" title="${provider === "oracle" ? "Oracle Cloud Infrastructure" : "Akamai Cloud / Linode"}">${escapeHtml(label)}</span>`;
+}
+
 function compactInstanceRow(state, instance) {
   const region = getRegion(state, instance.region);
   const plan = getPlan(state, instance.type);
   const ip = primaryIp(instance);
+  const isOracle = instance.provider === "oracle";
 
   return `
     <button
@@ -104,18 +111,19 @@ function compactInstanceRow(state, instance) {
       data-action="open-detail"
       data-id="${escapeHtml(instance.id)}"
       data-token-id="${escapeHtml(instance.tokenId || "")}"
+      data-provider="${escapeHtml(instance.provider || "linode")}"
       aria-label="查看 ${escapeHtml(instance.label || instance.id)} 详情"
     >
       <span class="compact-instance-primary">
         <span class="server-tile">${icon("server")}</span>
         <span class="compact-instance-copy">
           <strong>${escapeHtml(instance.label || `linode-${instance.id}`)}</strong>
-          <small>${escapeHtml(region?.label || instance.region || "未知区域")} · ${escapeHtml(typeDisplay(instance.type, plan))}</small>
+          <small>${providerBadge(instance, { compact: true })} ${escapeHtml(region?.label || instance.region || "未知区域")} · ${escapeHtml(typeDisplay(instance.type, plan))}</small>
           <small class="compact-instance-account">${escapeHtml(accountNameForInstance(instance))}</small>
         </span>
       </span>
       <span class="compact-instance-status">${statusBadge(instance.status, { compact: true })}</span>
-      <span class="compact-instance-ip mono">${escapeHtml(ip || "无公网 IP")}</span>
+      <span class="compact-instance-ip mono">${escapeHtml(ip || (isOracle ? "详情查看 IP" : "无公网 IP"))}</span>
       <span class="compact-instance-chevron">${icon("chevron-right")}</span>
     </button>
   `;
@@ -162,7 +170,7 @@ function accountPoolStrip(accounts) {
       <div class="account-pool-heading">
         <div>
           <span class="panel-kicker">CONNECTED ACCOUNTS</span>
-          <h2>${accounts.length} 个账户同时工作</h2>
+          <h2>${accounts.length} 个云账户同时工作</h2>
         </div>
         <span class="panel-note">并行聚合</span>
       </div>
@@ -174,7 +182,7 @@ function accountPoolStrip(accounts) {
                 <span class="account-pool-dot"></span>
                 <span>
                   <strong>${escapeHtml(account.label || account.tokenLabel || "Linode 账户")}</strong>
-                  <small>${account.instanceCount} 个实例${account.balance !== null ? ` · ${formatMoney(account.balance)}` : ""}${account.error ? ` · ${escapeHtml(account.error)}` : ""}</small>
+                  <small>${escapeHtml(account.providerLabel || "Akamai Cloud")} · ${account.instanceCount} 个实例${account.balance !== null ? ` · ${formatMoney(account.balance)}` : ""}${account.error ? ` · ${escapeHtml(account.error)}` : ""}</small>
                 </span>
               </span>
             `,
@@ -191,6 +199,9 @@ export function renderOverview(state) {
   const account = overview?.account;
   const accounts = overview?.accounts || [];
   const multiAccount = accounts.length > 1;
+  const hasLinodeAccount = accounts.some(
+    (entry) => (entry.provider || "linode") !== "oracle",
+  );
   const transfer = overview?.transfer;
   const events = overview?.events || [];
   const running = instances.filter((instance) => instance.status === "running").length;
@@ -224,8 +235,10 @@ export function renderOverview(state) {
       ? "所有实例运行正常，没有需要处理的事项。"
       : `${running} 个实例正在运行，${offline} 个已关机${transitional ? `，${transitional} 个正在变更` : ""}。`;
   const greetingName = multiAccount
-    ? `${accounts.length} 个 Linode 账户`
-    : accountName(account);
+    ? `${accounts.length} 个云账户`
+    : accountName(account) !== "云账户"
+      ? accountName(account)
+      : accounts[0]?.label || "云账户";
 
   return `
     <section class="page page-overview">
@@ -240,7 +253,11 @@ export function renderOverview(state) {
             ${state.refreshing ? spinner() : icon("refresh")}
             <span>同步状态</span>
           </button>
-          <a class="button button-primary" href="#create">${icon("plus")}<span>新建实例</span></a>
+          ${
+            state.settings?.tokenConfigured
+              ? `<a class="button button-primary" href="#create">${icon("plus")}<span>部署 Linode</span></a>`
+              : `<a class="button button-primary" href="#settings">${icon("plus")}<span>连接 Linode 以部署</span></a>`
+          }
         </div>
       </header>
 
@@ -294,7 +311,9 @@ export function renderOverview(state) {
               ? `${accounts.length} 个账户合并 · ${formatMoney(account?.balance_uninvoiced ?? 0)} 待出账`
               : account?.balance_uninvoiced !== undefined
                 ? `${formatMoney(account.balance_uninvoiced)} 待出账`
-                : "需要 Account 只读权限"
+                : hasLinodeAccount
+                  ? "需要 Account 只读权限"
+                  : "OCI 费用请在 Oracle 控制台查看"
           }</span>
         </article>
       </div>
@@ -330,7 +349,9 @@ export function renderOverview(state) {
                       iconName: "server",
                       title: "还没有计算实例",
                       description: "选择一个区域和配置，几分钟内即可完成部署。",
-                      action: `<a class="button button-primary button-sm" href="#create">${icon("plus")}创建实例</a>`,
+                      action: state.settings?.tokenConfigured
+                        ? `<a class="button button-primary button-sm" href="#create">${icon("plus")}创建实例</a>`
+                        : `<a class="button button-secondary button-sm" href="#settings">${icon("settings")}连接 Linode 以部署</a>`,
                     })
               }
             </div>
@@ -466,6 +487,7 @@ function quickActionButton(state, instance, operation, label, iconName) {
       data-action="instance-action"
       data-id="${escapeHtml(instance.id)}"
       data-token-id="${escapeHtml(instance.tokenId || "")}"
+      data-provider="${escapeHtml(instance.provider || "linode")}"
       data-operation="${operation}"
       title="${escapeHtml(label)}"
       aria-label="${escapeHtml(label)}"
@@ -484,6 +506,7 @@ function instanceCard(state, instance) {
   const transitional = isTransitional(instance.status);
   const tags = Array.isArray(instance.tags) ? instance.tags : [];
   const accountLabel = accountNameForInstance(instance);
+  const isOracle = instance.provider === "oracle";
 
   const actions =
     instance.status === "running"
@@ -498,11 +521,12 @@ function instanceCard(state, instance) {
       <div class="instance-cell instance-name-cell" data-label="实例">
         <span class="server-tile">${icon("server")}</span>
         <span class="instance-name-copy">
-          <button type="button" class="instance-name" data-action="open-detail" data-id="${escapeHtml(instance.id)}" data-token-id="${escapeHtml(instance.tokenId || "")}">
-            ${escapeHtml(instance.label || `linode-${instance.id}`)}
+          <button type="button" class="instance-name" data-action="open-detail" data-id="${escapeHtml(instance.id)}" data-token-id="${escapeHtml(instance.tokenId || "")}" data-provider="${escapeHtml(instance.provider || "linode")}">
+            ${escapeHtml(instance.label || `${isOracle ? "oci" : "linode"}-${instance.id}`)}
           </button>
           <span class="instance-row-meta">
-            <span class="mono">#${escapeHtml(instance.id)}</span>
+            ${providerBadge(instance, { compact: true })}
+            <span class="mono">#${escapeHtml(isOracle ? instance.id.slice(-12) : instance.id)}</span>
             ${accountLabel ? `<span>${escapeHtml(accountLabel)}</span>` : ""}
             ${tags.length > 0 ? `<span>${escapeHtml(tags.slice(0, 2).map((tag) => `#${tag}`).join(" "))}</span>` : ""}
           </span>
@@ -514,7 +538,7 @@ function instanceCard(state, instance) {
       </div>
       <div class="instance-cell instance-ip-cell" data-label="公网 IPv4">
         <span class="ip-stack">
-          <span class="mono">${escapeHtml(ip || "未分配")}</span>
+          <span class="mono">${escapeHtml(ip || (isOracle ? "详情查看" : "未分配"))}</span>
           ${
             ip
               ? `<button type="button" class="copy-button" data-copy="${escapeHtml(ip)}" aria-label="复制 IP" title="复制 IP">${icon("copy")}</button>`
@@ -525,11 +549,10 @@ function instanceCard(state, instance) {
       <div class="instance-cell instance-spec-cell" data-label="规格">
         <span class="spec-line">${escapeHtml(typeDisplay(instance.type, plan))}</span>
         <span class="instance-row-meta">
-          ${formatNumber(instance.specs?.vcpus ?? plan?.vcpus)} vCPU
+          ${formatNumber(instance.specs?.ocpus ?? instance.specs?.vcpus ?? plan?.vcpus)} ${isOracle ? "OCPU" : "vCPU"}
           <span class="meta-sep">·</span>
           ${formatMemory(instance.specs?.memory ?? plan?.memory)}
-          <span class="meta-sep">·</span>
-          ${formatDisk(instance.specs?.disk ?? plan?.disk)}
+          ${isOracle ? "" : `<span class="meta-sep">·</span>${formatDisk(instance.specs?.disk ?? plan?.disk)}`}
         </span>
       </div>
       <div class="instance-cell instance-region-cell" data-label="区域">
@@ -540,8 +563,8 @@ function instanceCard(state, instance) {
         </span>
       </div>
       <div class="instance-cell instance-cost-cell" data-label="月费">
-        <span class="instance-price">${price.monthly ? formatMoney(price.monthly) : "—"}</span>
-        <small class="mono">/mo</small>
+        <span class="instance-price">${price.monthly ? formatMoney(price.monthly) : isOracle ? "OCI" : "—"}</span>
+        <small class="mono">${isOracle ? "计费" : "/mo"}</small>
       </div>
       <div class="instance-cell instance-row-actions">
         ${actions ? `<span class="quick-actions">${actions}</span>` : ""}
@@ -551,6 +574,7 @@ function instanceCard(state, instance) {
           data-action="open-detail"
           data-id="${escapeHtml(instance.id)}"
           data-token-id="${escapeHtml(instance.tokenId || "")}"
+          data-provider="${escapeHtml(instance.provider || "linode")}"
           aria-label="管理 ${escapeHtml(instance.label || instance.id)}"
           title="管理实例"
         >
@@ -600,13 +624,17 @@ export function renderInstances(state) {
       ${pageHeader({
         eyebrow: "COMPUTE",
         title: "计算实例",
-        description: "启动、关闭、重启或检查分布在不同区域的 Linode 实例。",
+        description: "统一管理 Linode 与 Oracle Cloud 实例，执行开关机、重启和状态检查。",
         actions: `
           <button type="button" class="button button-secondary" data-action="refresh-overview">
             ${state.refreshing ? spinner() : icon("refresh")}
             <span>刷新</span>
           </button>
-          <a class="button button-primary" href="#create">${icon("plus")}<span>新建实例</span></a>
+          ${
+            state.settings?.tokenConfigured
+              ? `<a class="button button-primary" href="#create">${icon("plus")}<span>部署 Linode</span></a>`
+              : ""
+          }
         `,
       })}
 
@@ -718,7 +746,9 @@ export function renderInstances(state) {
                   : "尝试更换关键词、状态或区域筛选条件。",
               action:
                 instances.length === 0
-                  ? `<a class="button button-primary button-sm" href="#create">${icon("plus")}创建实例</a>`
+                  ? state.settings?.tokenConfigured
+                    ? `<a class="button button-primary button-sm" href="#create">${icon("plus")}创建实例</a>`
+                    : `<a class="button button-secondary button-sm" href="#settings">${icon("settings")}连接 Linode 以部署</a>`
                   : `<button type="button" class="button button-secondary button-sm" data-action="clear-filters">清除筛选</button>`,
             })
       }
@@ -889,6 +919,30 @@ export function renderCreateSummary(state) {
         ? `<span class="sr-only">密码强度 ${passwordScore}/4</span>`
         : ""
     }
+  `;
+}
+
+export function renderCreateUnavailable(state) {
+  return `
+    <section class="page page-create">
+      ${pageHeader({
+        eyebrow: "COMPUTE",
+        title: "部署实例",
+        description: "当前控制台支持 Linode 实例部署，以及 Oracle Cloud 实例的日常运维。",
+      })}
+      <div class="panel panel-empty-onboarding">
+        <span class="connect-mark">${icon("cloud")}</span>
+        <div>
+          <span class="panel-kicker">ORACLE CLOUD</span>
+          <h2>Oracle 实例创建尚未开放</h2>
+          <p>Oracle Cloud 已连接，可查看实例、网络和运行状态，并执行启动、关闭、重启。新实例请在 OCI 控制台或 Terraform 中创建，创建后会自动出现在这里。</p>
+          <div class="page-header-actions">
+            <a class="button button-primary" href="https://cloud.oracle.com/compute/instances" target="_blank" rel="noreferrer">${icon("external-link")}打开 OCI 控制台</a>
+            <a class="button button-secondary" href="#settings">${icon("settings")}连接 Linode 以启用部署</a>
+          </div>
+        </div>
+      </div>
+    </section>
   `;
 }
 
@@ -1234,6 +1288,9 @@ export function renderSettings(state) {
   const settings = state.settings;
   const proxy = settings.proxy || {};
   const tokens = Array.isArray(settings.tokens) ? settings.tokens : [];
+  const oracleAccounts = Array.isArray(settings.oracleAccounts)
+    ? settings.oracleAccounts
+    : [];
   const connected = Boolean(settings.tokenConfigured && !state.authInvalid);
   const poolSize =
     Number(settings.poolSize) ||
@@ -1253,7 +1310,7 @@ export function renderSettings(state) {
       ${pageHeader({
         eyebrow: "SYSTEM",
         title: "连接与设置",
-        description: "在浏览器中管理多个 Linode API 令牌、本地 SOCKS 代理和刷新偏好。",
+        description: "管理 Linode API 令牌、Oracle Cloud OCI 密钥、本地 SOCKS 代理和刷新偏好。",
       })}
 
       <div class="settings-grid">
@@ -1350,6 +1407,82 @@ export function renderSettings(state) {
           </p>
         </section>
 
+        <section class="panel settings-panel settings-oracle-panel">
+          <div class="settings-panel-heading">
+            <span class="settings-icon ${oracleAccounts.length > 0 ? "is-connected" : ""}">${icon("cloud")}</span>
+            <div>
+              <span class="panel-kicker">MULTI-CLOUD</span>
+              <h2>Oracle Cloud 账户</h2>
+            </div>
+            ${
+              oracleAccounts.length > 0
+                ? `<span class="status-badge status-running"><span class="status-indicator"></span>${oracleAccounts.length} 个账户</span>`
+                : `<span class="status-badge status-offline"><span class="status-indicator"></span>未连接</span>`
+            }
+          </div>
+
+          <div class="token-manager-toolbar">
+            <span class="token-manager-current">
+              <small>OCI API KEY</small>
+              <strong>${oracleAccounts.length > 0 ? `${oracleAccounts.length} 个 OCI 配置并行读取` : "使用 API 签名连接"}</strong>
+            </span>
+            <span class="token-manager-actions">
+              <button type="button" class="button button-primary button-sm" data-action="open-oracle">
+                ${icon("plus")} 添加 OCI 账户
+              </button>
+            </span>
+          </div>
+
+          <div class="token-pool-note">${icon("shield")}<span>使用租户 OCID、用户 OCID、API 密钥指纹和 RSA 私钥进行请求签名。私钥只会加密保存在本地 Node 服务中，不会返回浏览器。</span></div>
+
+          <div class="token-list">
+            ${
+              oracleAccounts.length > 0
+                ? oracleAccounts
+                    .map(
+                      (account) => `
+                        <article class="token-row oracle-account-row">
+                          <span class="token-row-icon">${icon("cloud")}</span>
+                          <span class="token-row-main">
+                            <span class="token-row-title">
+                              <strong>${escapeHtml(account.label)}</strong>
+                              <span class="provider-chip provider-oracle">OCI</span>
+                            </span>
+                            <span class="token-row-meta">
+                              <span class="mono">${escapeHtml(account.region)}</span>
+                              <span>租户 …${escapeHtml(String(account.tenancyId || "").slice(-10))}</span>
+                              <span>指纹 …${escapeHtml(String(account.fingerprint || "").slice(-8))}</span>
+                              <span>验证于 ${escapeHtml(relativeTime(account.lastVerifiedAt))}</span>
+                            </span>
+                          </span>
+                          <span class="token-row-actions">
+                            <button type="button" class="text-button" data-action="test-oracle" data-id="${escapeHtml(account.id)}">测试</button>
+                            <button type="button" class="text-button text-button-danger" data-action="delete-oracle" data-id="${escapeHtml(account.id)}">删除</button>
+                          </span>
+                        </article>
+                      `,
+                    )
+                    .join("")
+                : `<div class="token-empty">
+                    <span>${icon("cloud")}</span>
+                    <div><strong>还没有 Oracle Cloud 账户</strong><small>添加 OCI API 密钥后，即可在实例列表中管理 OCI 计算实例。</small></div>
+                    <button type="button" class="button button-secondary button-sm" data-action="open-oracle">${icon("plus")}添加 OCI 账户</button>
+                  </div>`
+            }
+          </div>
+
+          <p class="settings-note">
+            ${icon("info")}
+            <span>建议使用专用 IAM 用户，并授予目标 Compartment 的 <code>manage instances</code> 权限；如需自动发现子 Compartment，还需 <code>inspect compartments</code>。</span>
+          </p>
+          <div class="settings-actions">
+            <a class="resource-link resource-link-inline" href="https://docs.oracle.com/en-us/iaas/Content/API/Concepts/apisigningkey.htm" target="_blank" rel="noreferrer">
+              <span><strong>如何创建 OCI API 密钥</strong><small>Oracle Cloud 文档</small></span>
+              ${icon("external-link")}
+            </a>
+          </div>
+        </section>
+
         <section class="panel settings-panel settings-proxy-panel">
           <div class="settings-panel-heading">
             <span class="settings-icon ${proxy.enabled ? "is-connected" : ""}">${icon("network")}</span>
@@ -1367,7 +1500,7 @@ export function renderSettings(state) {
           <form id="proxy-form" novalidate>
             <label class="switch-row settings-switch">
               <span>
-                <strong>通过 SOCKS 代理访问 Linode API</strong>
+                <strong>通过 SOCKS 代理访问云 API</strong>
                 <small>适合 Clash、v2ray、sing-box 等本地代理。</small>
               </span>
               <input type="checkbox" id="proxy-enabled" ${proxy.enabled ? "checked" : ""} />
@@ -1407,7 +1540,7 @@ export function renderSettings(state) {
 
           <p class="settings-note">
             ${icon("info")}
-            <span>代理只影响 Node 服务访问 Linode API 的请求。修改后点击“测试代理”确认能否连通，再保存。</span>
+            <span>代理只影响 Node 服务访问 Linode 与 Oracle API 的请求。修改后点击“测试代理”确认能否连通，再保存。</span>
           </p>
         </section>
 
@@ -1433,7 +1566,7 @@ export function renderSettings(state) {
             <div><dt>API 地址</dt><dd class="mono">${escapeHtml(state.session?.apiBase || "https://api.linode.com/v4")}</dd></div>
             <div><dt>界面语言</dt><dd>简体中文</dd></div>
             <div><dt>计费单位</dt><dd>USD</dd></div>
-            <div><dt>控制台版本</dt><dd>v${escapeHtml(state.session?.version || "1.0.0")}</dd></div>
+            <div><dt>控制台版本</dt><dd>v${escapeHtml(state.session?.version || "1.1.0")}</dd></div>
           </div>
         </section>
 
@@ -1446,8 +1579,8 @@ export function renderSettings(state) {
             </div>
           </div>
           <ul class="security-list">
-            <li><span>${icon("check")}</span>使用最小权限令牌；授予 Linodes、IPs 读写和 Account 只读。</li>
-            <li><span>${icon("check")}</span>令牌和代理密码加密保存在本机，不写入浏览器 localStorage。</li>
+            <li><span>${icon("check")}</span>Linode 使用最小权限令牌；Oracle 使用专用 IAM 用户和独立 API 密钥。</li>
+            <li><span>${icon("check")}</span>令牌、OCI 私钥和代理密码加密保存在本机，不写入浏览器 localStorage。</li>
             <li><span>${icon("check")}</span>若需通过公网访问，请在前面加 HTTPS 反向代理，并限制来源 IP。</li>
             <li><span>${icon("check")}</span>删除实例不可恢复；控制台会要求输入实例名称二次确认。</li>
           </ul>
@@ -1485,24 +1618,24 @@ export function renderDisconnected(state) {
       <div class="connect-card">
         <span class="connect-mark">${icon("cloud")}</span>
         <span class="eyebrow">CLOUDVMCONTROLLER / LOCAL</span>
-        <h1>连接你的 Linode 账户</h1>
-        <p>添加个人 API 令牌，在一个控制面中查看实例、部署新机器、掌握流量并执行日常运维。令牌加密保存在本机服务端。</p>
+        <h1>连接你的云账户</h1>
+        <p>连接 Linode 或 Oracle Cloud，在一个本地控制面中查看实例、执行开关机与重启。Linode 还支持部署、监控和 IP 管理。</p>
         <div class="connect-actions">
           <button type="button" class="button button-primary" data-action="open-token">
-            ${icon("key")} 连接 Linode 账户
+            ${icon("key")} 连接 Linode
           </button>
-          <a class="button button-secondary" href="https://cloud.linode.com/profile/tokens" target="_blank" rel="noreferrer">
-            创建 API 令牌 ${icon("external-link")}
-          </a>
+          <button type="button" class="button button-secondary" data-action="open-oracle">
+            ${icon("cloud")} 连接 Oracle Cloud
+          </button>
         </div>
         ${state.sessionError ? `<div class="form-alert">${icon("alert")}<span>${escapeHtml(state.sessionError)}</span></div>` : ""}
         <div class="connect-features">
           <span><strong>01</strong> 实例开关机</span>
           <span><strong>02</strong> 实时监控</span>
-          <span><strong>03</strong> 快速部署</span>
-          <span><strong>04</strong> 本地凭据</span>
+          <span><strong>03</strong> 多云账户</span>
+          <span><strong>04</strong> 加密凭据</span>
         </div>
-        <p class="connect-foot">${icon("shield")} 浏览器不会接触或持久化令牌；所有凭据由本地 Node 服务管理。</p>
+        <p class="connect-foot">${icon("shield")} 浏览器不会接触或持久化令牌与私钥；所有凭据由本地 Node 服务加密管理。</p>
       </div>
     </section>
   `;
@@ -1527,6 +1660,7 @@ function detailActionButton(state, instance, operation, label, iconName, style =
       data-action="instance-action"
       data-id="${escapeHtml(instance.id)}"
       data-token-id="${escapeHtml(instance.tokenId || "")}"
+      data-provider="${escapeHtml(instance.provider || "linode")}"
       data-operation="${operation}"
       ${disabled ? "disabled" : ""}
     >
@@ -1947,10 +2081,22 @@ export function renderIpRenewModal(state) {
                 <div class="ip-swap-warning">
                   ${icon("alert")}
                   <span>会先释放当前路由段，再申请全新的 /${prefix} 段。每个账户在每个区域默认只有一个 IPv6 路由段；如果新段申请失败，旧段可能已经释放。默认 SLAAC 地址不会改变。</span>
+                </div>
+                <div class="ip-swap-note">
+                  ${icon("info")}
+                  <span>新段会路由到实例的 SLAAC 地址，但不会自动把段内地址配置进系统。请在实例内从新段添加一个地址（/64 段使用 /64，/56 段使用 /56），并放行 ICMPv6 后再测试；前缀本身不能直接 ping。</span>
+                </div>
+                <div class="ip-swap-warning">
+                  ${icon("alert")}
+                  <span>如果实例开启了 Network Helper，重启时会重写网卡配置，手工添加的段内地址可能消失。长期使用前请先准备静态网络配置，再按 Linode 官方建议关闭 Network Helper；不要只关闭 Helper 就直接重启。</span>
+                </div>
+                <div class="ip-swap-note">
+                  ${icon("info")}
+                  <span>IPv6 路由段不单独计费；实际费用以 Akamai 账单为准。</span>
                 </div>`
               : `<div class="ip-swap-warning">
                   ${icon("alert")}
-                  <span>将申请同区域的 Reserved IP，绑定到实例后自动转换为临时 IP，避免持续计费。该操作受账户和区域的 IPv4 配额限制。</span>
+                  <span>会先为实例申请一个额外公网 IPv4，成功后再删除旧地址。账户必须具备额外 IPv4 配额（通常需提交工单）；额外 IPv4 会单独计费，新旧地址短暂并存期间也可能产生按小时计费。分配失败时不会删除旧地址。</span>
                 </div>`
           }
 
@@ -1979,6 +2125,137 @@ export function renderIpRenewModal(state) {
   `;
 }
 
+function renderOracleDrawerBody(state, detail, instance) {
+  const ips = detail.data?.ips || {};
+  const publicIps = Array.isArray(ips.publicIpv4s)
+    ? ips.publicIpv4s
+    : [ips.publicIpv4].filter(Boolean);
+  const privateIps = Array.isArray(ips.privateIpv4s)
+    ? ips.privateIpv4s
+    : [ips.privateIpv4].filter(Boolean);
+  const ipv6Addresses = Array.isArray(ips.ipv6s)
+    ? ips.ipv6s
+    : [ips.ipv6].filter(Boolean);
+  const primaryAddress = publicIps[0] || privateIps[0] || "";
+  const isRunning = instance.status === "running";
+  const isOffline = instance.status === "offline";
+  const meta = getStatusMeta(instance.status);
+  const tags = Array.isArray(instance.tags) ? instance.tags : [];
+  const consoleUrl = `https://cloud.oracle.com/compute/instances/${encodeURIComponent(instance.id)}?region=${encodeURIComponent(instance.region)}`;
+
+  return `
+    <div class="drawer-status-row">
+      ${statusBadge(instance.status)}
+      ${providerBadge(instance)}
+      <span class="drawer-instance-id mono" title="${escapeHtml(instance.id)}">OCI …${escapeHtml(instance.id.slice(-12))}</span>
+    </div>
+
+    <div class="drawer-actions">
+      ${isOffline ? detailActionButton(state, instance, "boot", "启动", "power", "button-primary") : ""}
+      ${isRunning ? detailActionButton(state, instance, "reboot", "重启", "reboot") : ""}
+      ${isRunning ? detailActionButton(state, instance, "shutdown", "关闭", "power", "button-danger-ghost") : ""}
+      <a class="button button-secondary button-sm" href="${consoleUrl}" target="_blank" rel="noreferrer">
+        ${icon("external-link")} <span>OCI 控制台</span>
+      </a>
+    </div>
+
+    ${meta.transitional ? `<div class="drawer-transition">${spinner()} 实例状态为 ${escapeHtml(instance.providerStatus || meta.label)}，部分操作暂时禁用。</div>` : ""}
+    ${instance.status === "failed" ? `<div class="form-alert">${icon("alert")}<span>OCI 报告实例处于 FAILED 状态，请前往 OCI 控制台检查维护事件或实例日志。</span></div>` : ""}
+
+    <section class="drawer-section">
+      <div class="drawer-section-heading">
+        <span class="panel-kicker">NETWORK</span>
+        <h3>网络地址</h3>
+      </div>
+      ${detail.data?.ipsError ? `<div class="inline-error"><span class="inline-error-icon">${icon("alert")}</span><span><strong>网络信息不可用</strong><small>${escapeHtml(detail.data.ipsError)}</small></span></div>` : ""}
+      <div class="address-list">
+        ${
+          publicIps.length > 0
+            ? publicIps
+                .map(
+                  (address, index) => `
+                    <div class="address-row">
+                      <span class="address-type">公网 IPv4${index > 0 ? ` ${index + 1}` : ""}</span>
+                      <span class="mono">${escapeHtml(address)}</span>
+                      <button type="button" class="copy-button" data-copy="${escapeHtml(address)}" aria-label="复制公网 IPv4">${icon("copy")}</button>
+                    </div>
+                  `,
+                )
+                .join("")
+            : `<div class="address-row"><span class="address-type">公网 IPv4</span><span class="text-muted">未分配</span></div>`
+        }
+        ${privateIps
+          .map(
+            (address, index) => `
+              <div class="address-row">
+                <span class="address-type">私网 IPv4${index > 0 ? ` ${index + 1}` : ""}</span>
+                <span class="mono">${escapeHtml(address)}</span>
+                <button type="button" class="copy-button" data-copy="${escapeHtml(address)}" aria-label="复制私网 IPv4">${icon("copy")}</button>
+              </div>
+            `,
+          )
+          .join("")}
+        ${ipv6Addresses
+          .map(
+            (address, index) => `
+              <div class="address-row">
+                <span class="address-type">IPv6${index > 0 ? ` ${index + 1}` : ""}</span>
+                <span class="mono address-wrap">${escapeHtml(address)}</span>
+                <button type="button" class="copy-button" data-copy="${escapeHtml(address)}" aria-label="复制 IPv6">${icon("copy")}</button>
+              </div>
+            `,
+          )
+          .join("")}
+        ${
+          primaryAddress
+            ? `<div class="address-row">
+                <span class="address-type">SSH</span>
+                <span class="mono">ssh opc@${escapeHtml(primaryAddress)}</span>
+                <button type="button" class="copy-button" data-copy="ssh opc@${escapeHtml(primaryAddress)}" aria-label="复制 SSH 命令">${icon("copy")}</button>
+              </div>`
+            : ""
+        }
+      </div>
+      <div class="network-swap-row">
+        <span>${icon("info")} Oracle 的公网 IPv4 与 VNIC 绑定；当前控制台只读网络信息，不执行 IP 交换、换新或安全列表修改。</span>
+      </div>
+    </section>
+
+    <section class="drawer-section">
+      <div class="drawer-section-heading">
+        <span class="panel-kicker">CONFIGURATION</span>
+        <h3>实例配置</h3>
+      </div>
+      <dl class="detail-meta-grid">
+        <div><dt>所属账户</dt><dd>${escapeHtml(instance.accountLabel || "Oracle Cloud")}</dd></div>
+        <div><dt>区域</dt><dd>${escapeHtml(instance.region)}</dd></div>
+        <div><dt>可用域</dt><dd>${escapeHtml(instance.availabilityDomain || "—")}</dd></div>
+        <div><dt>Shape</dt><dd>${escapeHtml(instance.type || "—")}</dd></div>
+        <div><dt>计算规格</dt><dd>${formatNumber(instance.specs?.ocpus)} OCPU · ${formatMemory(instance.specs?.memory)}</dd></div>
+        <div><dt>创建时间</dt><dd>${formatDate(instance.created)}</dd></div>
+        <div class="detail-span-two"><dt>Compartment</dt><dd class="mono address-wrap" title="${escapeHtml(instance.compartmentId)}">${escapeHtml(instance.compartmentId)}</dd></div>
+        <div class="detail-span-two"><dt>实例 OCID</dt><dd class="mono address-wrap" title="${escapeHtml(instance.id)}">${escapeHtml(instance.id)}</dd></div>
+      </dl>
+      <div class="detail-spec-row">
+        <span>${icon("cpu")}<strong>${formatNumber(instance.specs?.ocpus)}</strong><small>OCPU</small></span>
+        <span>${icon("memory")}<strong>${formatMemory(instance.specs?.memory)}</strong><small>内存</small></span>
+        <span>${icon("server")}<strong>${escapeHtml(instance.type || "—")}</strong><small>Shape</small></span>
+      </div>
+      ${tags.length > 0 ? `<div class="detail-tags">${tags.map((tag) => `<span class="tag">#${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
+    </section>
+
+    <section class="drawer-section">
+      <div class="drawer-section-heading">
+        <span class="panel-kicker">OPERATIONS</span>
+        <h3>运维边界</h3>
+      </div>
+      <div class="network-swap-row">
+        <span>${icon("info")} 当前 OCI 接入支持实例发现、详情、启动、关闭和重启。监控、备份、串口控制台、终止实例和创建实例仍请在 OCI 控制台完成。</span>
+      </div>
+    </section>
+  `;
+}
+
 export function renderDrawer(state) {
   const detail = state.detail;
   if (!detail.open) {
@@ -1986,7 +2263,8 @@ export function renderDrawer(state) {
   }
 
   const instance = detail.data?.instance;
-  const title = instance?.label || `实例 #${detail.id}`;
+  const isOracle = detail.provider === "oracle" || instance?.provider === "oracle";
+  const title = instance?.label || `${isOracle ? "OCI 实例" : "实例"} ${String(detail.id).slice(-12)}`;
   const status = instance?.status;
   const meta = getStatusMeta(status);
 
@@ -2003,10 +2281,12 @@ export function renderDrawer(state) {
   } else if (detail.error) {
     body = `
       ${renderInlineError(detail.error)}
-      <button type="button" class="button button-secondary button-block" data-action="retry-detail" data-id="${escapeHtml(detail.id)}" data-token-id="${escapeHtml(detail.tokenId || "")}">
+      <button type="button" class="button button-secondary button-block" data-action="retry-detail" data-id="${escapeHtml(detail.id)}" data-token-id="${escapeHtml(detail.tokenId || "")}" data-provider="${escapeHtml(detail.provider || "linode")}">
         ${icon("refresh")} 重新加载
       </button>
     `;
+  } else if (instance?.provider === "oracle") {
+    body = renderOracleDrawerBody(state, detail, instance);
   } else if (instance) {
     const region = getRegion(state, instance.region);
     const plan = getPlan(state, instance.type);
@@ -2088,7 +2368,7 @@ export function renderDrawer(state) {
           }
         </div>
         <div class="network-swap-row">
-          <span>${icon("info")} 默认 IPv6 为 SLAAC 地址，不可变；IPv6 交换/换新仅针对 /56 或 /64 路由段。</span>
+          <span>${icon("info")} 默认 IPv6 为 SLAAC 地址，不可变；交换/换新的是 /56 或 /64 路由段。路由段前缀不能直接 ping，需在实例内配置段内地址；Network Helper 开启时重启可能覆盖手工配置。</span>
           <div class="network-swap-actions">
             <button
               type="button"
@@ -2183,9 +2463,9 @@ export function renderDrawer(state) {
       <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
         <header class="drawer-header">
           <div class="drawer-title-wrap">
-            <span class="drawer-title-icon">${icon("server")}</span>
+            <span class="drawer-title-icon">${icon(isOracle ? "cloud" : "server")}</span>
             <div>
-              <span class="panel-kicker">INSTANCE DETAIL</span>
+              <span class="panel-kicker">${isOracle ? "ORACLE CLOUD INSTANCE" : "INSTANCE DETAIL"}</span>
               <h2 id="drawer-title">${escapeHtml(title)}</h2>
             </div>
           </div>

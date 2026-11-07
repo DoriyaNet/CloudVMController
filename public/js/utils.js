@@ -168,6 +168,8 @@ export const STATUS_META = {
   rebuilding: { label: "重建中", tone: "transitional", transitional: true },
   cloning: { label: "克隆中", tone: "transitional", transitional: true },
   restoring: { label: "恢复中", tone: "transitional", transitional: true },
+  transitional: { label: "变更中", tone: "transitional", transitional: true },
+  failed: { label: "异常", tone: "danger", transitional: false },
 };
 
 export function getStatusMeta(status) {

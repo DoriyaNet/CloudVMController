@@ -15,6 +15,7 @@ import {
 } from "./utils.js";
 import {
   renderCreate,
+  renderCreateUnavailable,
   renderCreateSkeleton,
   renderCreateSummary,
   renderDisconnected,
@@ -84,7 +85,7 @@ function newCreateState() {
 }
 
 const state = {
-  session: { tokenConfigured: false, apiBase: "", version: "1.0.0" },
+  session: { tokenConfigured: false, apiBase: "", version: "1.1.0" },
   settings: null,
   sessionError: "",
   authInvalid: false,
@@ -104,6 +105,7 @@ const state = {
     open: false,
     id: null,
     tokenId: null,
+    provider: "linode",
     loading: false,
     error: null,
     data: null,
@@ -148,26 +150,38 @@ const api = createApi({ onUnauthorized: handleUnauthorized });
 let availabilitySequence = 0;
 let isComposingSearch = false;
 
-function hasCredentials() {
+function hasLinodeCredentials() {
   const configured =
     state.settings?.tokenConfigured ?? state.session.tokenConfigured;
   return Boolean(configured && !state.authInvalid);
 }
 
+function hasOracleCredentials() {
+  const accounts = state.settings?.oracleAccounts;
+  if (Array.isArray(accounts) && accounts.length > 0) {
+    return true;
+  }
+  return Boolean(state.settings?.oracleConfigured);
+}
+
+function hasCredentials() {
+  return hasLinodeCredentials() || hasOracleCredentials();
+}
+
 function accountName(account) {
   if (!account) {
-    return "Linode 账户";
+    return "云账户";
   }
   return (
     [account.first_name, account.last_name].filter(Boolean).join(" ") ||
     account.company ||
     account.email ||
-    "Linode 账户"
+    "云账户"
   );
 }
 
 function initials(value) {
-  const parts = String(value || "Linode")
+  const parts = String(value || "Cloud")
     .trim()
     .split(/\s+/)
     .filter(Boolean);
@@ -183,8 +197,23 @@ function initials(value) {
 
 function tokenSourceLabel() {
   const poolSize = Number(state.settings?.poolSize || 0);
-  if (poolSize > 1) {
-    return `${poolSize} 个令牌 · 多账户模式`;
+  const oracleCount = Array.isArray(state.settings?.oracleAccounts)
+    ? state.settings.oracleAccounts.length
+    : 0;
+  const parts = [];
+  if (poolSize > 0) {
+    parts.push(poolSize > 1 ? `${poolSize} 个 Linode 令牌` : "Linode 令牌");
+  }
+  if (oracleCount > 0) {
+    parts.push(
+      oracleCount > 1 ? `${oracleCount} 个 Oracle 账户` : "Oracle Cloud",
+    );
+  }
+  if (parts.length > 1) {
+    return `${parts.join(" + ")} · 多云模式`;
+  }
+  if (parts.length === 1) {
+    return parts[0];
   }
   const source =
     state.settings?.credentialSource ||
@@ -196,7 +225,7 @@ function tokenSourceLabel() {
   if (source === "env") {
     return "服务端 .env 令牌";
   }
-  return "未配置令牌";
+  return "未配置凭据";
 }
 
 function viewFromHash() {
@@ -209,19 +238,19 @@ function friendlyError(error) {
     return "发生未知错误。";
   }
   if (error.status === 401) {
-    return "API 令牌无效或已过期，请重新连接。";
+    return error.message || "API 凭据无效或已过期，请重新连接。";
   }
   if (error.status === 403) {
     const reason = error.details?.[0]?.reason;
     return reason
-      ? `令牌权限不足：${reason}`
-      : "令牌权限不足，请确认已授予 Linodes 读写权限。";
+      ? `凭据权限不足：${reason}`
+      : "API 凭据权限不足，请检查账户授权。";
   }
   if (error.status === 429) {
-    return "Linode API 请求频率超限，请稍后再试。";
+    return "云 API 请求频率超限，请稍后再试。";
   }
   if (error.status === 504) {
-    return "Linode API 响应超时，请稍后重试。";
+    return "云 API 响应超时，请稍后重试。";
   }
   if (error.status === 0 || error.code === "NETWORK_ERROR") {
     return "无法连接本地服务，请确认 Node 服务仍在运行。";
@@ -250,25 +279,38 @@ function updateShell() {
     : "—";
 
   const account = state.overview?.account;
-  const accountCount = state.overview?.accounts?.length || (account ? 1 : 0);
+  const accountSlices = state.overview?.accounts || [];
+  const accountCount = accountSlices.length || (account ? 1 : 0);
   const multiAccount = accountCount > 1;
+  const oraclePrimary = accountSlices.find(
+    (entry) => entry.provider === "oracle",
+  );
+  const linodeCount = accountSlices.filter(
+    (entry) => entry.provider !== "oracle",
+  ).length;
+  const oracleCount = accountSlices.filter(
+    (entry) => entry.provider === "oracle",
+  ).length;
   const name = multiAccount
-    ? `${accountCount} 个 Linode 账户`
-    : accountName(account);
+    ? `${accountCount} 个云账户`
+    : account
+      ? accountName(account)
+      : oraclePrimary?.label || "云账户";
   const email = multiAccount
-    ? `${state.overview?.poolSize || accountCount} 个令牌同时工作`
-    : account?.email || tokenSourceLabel();
+    ? [
+        linodeCount ? `${linodeCount} Linode` : "",
+        oracleCount ? `${oracleCount} Oracle` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : account?.email || oraclePrimary?.providerLabel || tokenSourceLabel();
   const avatar = multiAccount ? "MA" : account ? initials(name) : "CV";
   elements.sidebarAvatar.textContent = avatar;
   elements.topbarAvatarText.textContent = avatar;
   elements.sidebarAccountName.textContent =
-    account || multiAccount
-      ? name
-      : state.overview
-        ? "Linode 账户"
-        : "未连接";
+    accountSlices.length > 0 ? name : state.overview ? "云账户" : "未连接";
   elements.sidebarAccountEmail.textContent =
-    account || multiAccount ? email : tokenSourceLabel();
+    accountSlices.length > 0 ? email : tokenSourceLabel();
   elements.tokenButton.title = `API 凭据：${tokenSourceLabel()}`;
   elements.tokenButton.classList.toggle("has-credentials", hasCredentials());
 
@@ -353,6 +395,10 @@ function renderView() {
   }
 
   if (state.view === "create") {
+    if (!hasLinodeCredentials()) {
+      paintView(renderCreateUnavailable(state));
+      return;
+    }
     ensureCreateSelections();
     paintView(state.catalog
       ? renderCreate(state)
@@ -518,7 +564,7 @@ async function startAvailabilityCheck(region, tokenId = state.create.tokenId) {
 }
 
 function activateCreateView() {
-  if (!hasCredentials()) {
+  if (!hasLinodeCredentials()) {
     renderView();
     return;
   }
@@ -664,10 +710,11 @@ async function loadInitialData() {
   }
   state.loading = true;
   renderView();
-  await Promise.all([
-    loadOverview({ suppressRender: true }),
-    loadCatalog({ suppressRender: true }),
-  ]);
+  const tasks = [loadOverview({ suppressRender: true })];
+  if (hasLinodeCredentials()) {
+    tasks.push(loadCatalog({ suppressRender: true }));
+  }
+  await Promise.all(tasks);
   state.loading = false;
   updateShell();
 
@@ -680,7 +727,7 @@ async function loadInitialData() {
 
 async function refreshAll({ silent = false, includeCatalog = false } = {}) {
   if (!hasCredentials()) {
-    openTokenModal();
+    window.location.hash = "#settings";
     return;
   }
   if (state.refreshing) {
@@ -691,7 +738,7 @@ async function refreshAll({ silent = false, includeCatalog = false } = {}) {
   updateShell();
 
   const tasks = [loadOverview({ silent: true, suppressRender: true })];
-  if (includeCatalog) {
+  if (includeCatalog && hasLinodeCredentials()) {
     tasks.push(loadCatalog({ suppressRender: true }));
   }
   await Promise.all(tasks);
@@ -752,6 +799,21 @@ function openTokenModal({ error = "" } = {}) {
   renderModal();
   requestAnimationFrame(() => {
     document.querySelector("#token-input")?.focus();
+  });
+}
+
+function openOracleModal({ error = "" } = {}) {
+  if (state.modal && state.modal.type !== "oracle") {
+    return;
+  }
+  state.modal = {
+    type: "oracle",
+    error,
+    busy: false,
+  };
+  renderModal();
+  requestAnimationFrame(() => {
+    document.querySelector("#oracle-tenancy")?.focus();
   });
 }
 
@@ -844,6 +906,91 @@ function renderModal() {
         </section>
       </div>
     `;
+  } else if (state.modal.type === "oracle") {
+    elements.modalRoot.innerHTML = `
+      <div class="modal-layer">
+        <div class="modal-backdrop" data-action="close-modal"></div>
+        <section class="modal-card modal-token modal-oracle" role="dialog" aria-modal="true" aria-labelledby="oracle-modal-title">
+          <button type="button" class="icon-button modal-close" data-action="close-modal" aria-label="关闭">${icon("x")}</button>
+          <span class="modal-mark">${icon("cloud")}</span>
+          <span class="eyebrow">ORACLE CLOUD INFRASTRUCTURE</span>
+          <h2 id="oracle-modal-title">连接 OCI 账户</h2>
+          <p>使用 OCI API 签名密钥访问 Compute API。私钥会加密保存在本地 Node 服务中，不会返回浏览器。</p>
+
+          <div class="form-alert${state.modal.error ? "" : " is-hidden"}" id="oracle-error" role="alert">
+            ${icon("alert")}
+            <span>${escapeHtml(state.modal.error)}</span>
+          </div>
+
+          <form id="oracle-account-form" novalidate>
+            <label class="form-field">
+              <span class="field-label">账户名称 <em>可选</em></span>
+              <input type="text" id="oracle-label" name="label" placeholder="例如 生产租户、Oracle 东京" maxlength="64" autocomplete="off" />
+            </label>
+            <label class="form-field">
+              <span class="field-label">Tenancy OCID</span>
+              <input type="text" id="oracle-tenancy" name="tenancyId" placeholder="ocid1.tenancy.oc1..…" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="form-field">
+              <span class="field-label">User OCID</span>
+              <input type="text" id="oracle-user" name="userId" placeholder="ocid1.user.oc1..…" autocomplete="off" spellcheck="false" />
+            </label>
+            <div class="form-grid-two">
+              <label class="form-field">
+                <span class="field-label">区域</span>
+                <input type="text" id="oracle-region" name="region" placeholder="us-ashburn-1" autocomplete="off" spellcheck="false" />
+              </label>
+              <label class="form-field">
+                <span class="field-label">密钥指纹</span>
+                <input type="text" id="oracle-fingerprint" name="fingerprint" placeholder="aa:bb:cc:…" autocomplete="off" spellcheck="false" />
+              </label>
+            </div>
+            <label class="form-field">
+              <span class="field-label">Compartment OCID <em>可选</em></span>
+              <input type="text" id="oracle-compartment" name="compartmentId" placeholder="留空时扫描租户与可访问的子 Compartment" autocomplete="off" spellcheck="false" />
+              <span class="field-hint">限定到单一 Compartment 可减少 API 请求；留空需要 <code>inspect compartments</code> 权限。</span>
+            </label>
+            <label class="form-field">
+              <span class="field-label">API 私钥（PEM）</span>
+              <textarea id="oracle-private-key" name="privateKey" rows="8" autocomplete="off" spellcheck="false"></textarea>
+              <span class="field-hint">在 OCI「我的概要信息 → API 密钥」中创建。请使用专用 IAM 用户并授予目标 Compartment 的 <code>manage instances</code> 权限。</span>
+            </label>
+
+            <button type="submit" class="button button-primary button-block token-submit oracle-submit">
+              ${icon("zap")} <span>验证并保存</span>
+            </button>
+          </form>
+
+          <div class="modal-foot">
+            <span>${icon("shield")} RSA 私钥使用 AES-256-GCM 加密落盘</span>
+            <a href="https://docs.oracle.com/en-us/iaas/Content/API/Concepts/apisigningkey.htm" target="_blank" rel="noreferrer">
+              创建 API 密钥 ${icon("external-link")}
+            </a>
+          </div>
+        </section>
+      </div>
+    `;
+  } else if (state.modal.type === "delete-oracle") {
+    const account = state.modal.account;
+    elements.modalRoot.innerHTML = `
+      <div class="modal-layer">
+        <div class="modal-backdrop" data-action="close-modal"></div>
+        <section class="modal-card modal-delete" role="dialog" aria-modal="true" aria-labelledby="delete-oracle-title">
+          <button type="button" class="icon-button modal-close" data-action="close-modal" aria-label="关闭">${icon("x")}</button>
+          <span class="modal-mark modal-mark-danger">${icon("cloud")}</span>
+          <span class="eyebrow eyebrow-danger">REMOVE OCI ACCOUNT</span>
+          <h2 id="delete-oracle-title">删除本地 OCI 账户</h2>
+          <p>将从本机加密存储中删除 <strong>${escapeHtml(account.label)}</strong>（${escapeHtml(account.region)}）。这不会删除 OCI 上的用户或 API 密钥。</p>
+          <form id="delete-oracle-form">
+            <div class="form-alert is-hidden" id="delete-oracle-error" role="alert">${icon("alert")}<span></span></div>
+            <div class="modal-actions">
+              <button type="button" class="button button-secondary" data-action="close-modal">取消</button>
+              <button type="submit" class="button button-danger delete-oracle-submit">${icon("trash")} 删除 OCI 账户</button>
+            </div>
+          </form>
+        </section>
+      </div>
+    `;
   } else if (state.modal.type === "delete-token") {
     const token = state.modal.token;
     elements.modalRoot.innerHTML = `
@@ -928,6 +1075,131 @@ async function connectWithToken(rawToken, { label = "", activate = true } = {}) 
   updateShell();
   await refreshAfterSettingsChange();
   showToast("API 令牌已加密保存", "success");
+}
+
+async function connectOracleAccount(payload) {
+  const result = await api.addOracleAccount(payload);
+  applySettings(result.settings);
+  state.modal = null;
+  renderModal();
+  updateShell();
+  await refreshAfterSettingsChange();
+  showToast("Oracle Cloud 账户已验证并加密保存", "success");
+}
+
+async function handleOracleSubmit(event) {
+  event.preventDefault();
+  if (state.modal?.type !== "oracle" || state.modal.busy) {
+    return;
+  }
+
+  const form = event.currentTarget;
+  const field = (id) => form.querySelector(`#${id}`)?.value.trim() || "";
+  const payload = {
+    label: field("oracle-label"),
+    tenancyId: field("oracle-tenancy"),
+    userId: field("oracle-user"),
+    region: field("oracle-region"),
+    fingerprint: field("oracle-fingerprint"),
+    compartmentId: field("oracle-compartment"),
+    privateKey: form.querySelector("#oracle-private-key")?.value || "",
+  };
+  const errorElement = document.querySelector("#oracle-error");
+  const submit = form.querySelector(".oracle-submit");
+
+  const missing = [
+    ["oracle-tenancy", "Tenancy OCID"],
+    ["oracle-user", "User OCID"],
+    ["oracle-region", "区域"],
+    ["oracle-fingerprint", "密钥指纹"],
+    ["oracle-private-key", "API 私钥"],
+  ].find(([id]) => !field(id));
+  if (missing) {
+    errorElement.classList.remove("is-hidden");
+    errorElement.querySelector("span").textContent =
+      `请填写 ${missing[1]}。`;
+    document.querySelector(`#${missing[0]}`)?.focus();
+    return;
+  }
+
+  state.modal.busy = true;
+  errorElement.classList.add("is-hidden");
+  form.querySelectorAll("input, textarea, button").forEach((element) => {
+    element.disabled = true;
+  });
+  submit.innerHTML = `${spinner()}<span>正在验证 OCI 签名…</span>`;
+
+  try {
+    await connectOracleAccount(payload);
+  } catch (error) {
+    if (state.modal?.type === "oracle") {
+      errorElement.classList.remove("is-hidden");
+      errorElement.querySelector("span").textContent = friendlyError(error);
+      state.modal.busy = false;
+      form.querySelectorAll("input, textarea, button").forEach((element) => {
+        element.disabled = false;
+      });
+      submit.innerHTML = `${icon("zap")}<span>验证并保存</span>`;
+    }
+  }
+}
+
+function openDeleteOracleModal(account) {
+  if (!account) {
+    return;
+  }
+  state.modal = { type: "delete-oracle", account, busy: false };
+  renderModal();
+}
+
+async function handleDeleteOracleSubmit(event) {
+  event.preventDefault();
+  if (state.modal?.type !== "delete-oracle" || state.modal.busy) {
+    return;
+  }
+  const account = state.modal.account;
+  const errorElement = document.querySelector("#delete-oracle-error");
+  const submit = document.querySelector(".delete-oracle-submit");
+  state.modal.busy = true;
+  errorElement.classList.add("is-hidden");
+  submit.disabled = true;
+  submit.innerHTML = `${spinner()}<span>正在删除…</span>`;
+
+  try {
+    const result = await api.deleteOracleAccount(account.id);
+    applySettings(result.settings);
+    state.modal = null;
+    renderModal();
+    await refreshAfterSettingsChange();
+    showToast(`OCI 账户 ${account.label} 已从本机删除`, "success");
+  } catch (error) {
+    if (state.modal?.type === "delete-oracle") {
+      errorElement.classList.remove("is-hidden");
+      errorElement.querySelector("span").textContent = friendlyError(error);
+      state.modal.busy = false;
+      submit.disabled = false;
+      submit.innerHTML = `${icon("trash")} 删除 OCI 账户`;
+    }
+  }
+}
+
+async function testOracleAccount(accountId) {
+  const account = state.settings?.oracleAccounts?.find(
+    (entry) => entry.id === accountId,
+  );
+  try {
+    const result = await api.testOracleAccount(accountId);
+    applySettings(result.settings);
+    if (state.view === "settings") {
+      renderView();
+    }
+    showToast(
+      `OCI 账户 ${account?.label || ""} 验证通过 · ${result.verification.latencyMs} ms`,
+      "success",
+    );
+  } catch (error) {
+    showToast(friendlyError(error), "error");
+  }
 }
 
 function handleUnauthorized(error) {
@@ -1266,8 +1538,12 @@ async function handleIpSwapSubmit(event) {
     state.modal = null;
     renderModal();
     updateShell();
+    const followUp =
+      kind === "ipv4"
+        ? "请重启两台实例后生效"
+        : "请重启两台实例，并在系统内确认新路由段的地址和 ICMPv6 防火墙配置";
     showToast(
-      `已交换${kind === "ipv4" ? " IPv4 公网地址" : " IPv6 路由段"}，请重启两台实例后生效`,
+      `已交换${kind === "ipv4" ? " IPv4 公网地址" : " IPv6 路由段"}，${followUp}`,
       "success",
     );
 
@@ -1381,9 +1657,13 @@ async function handleIpRenewSubmit(event) {
     const newValue =
       kind === "ipv4" ? result?.newAddress || "" : result?.newRange || "";
     showToast(
-      newValue
-        ? `已获取新${kind === "ipv4" ? " IPv4 地址" : " IPv6 路由段"} ${newValue}，请重启实例后生效`
-        : "IP 已换新，请重启实例后生效",
+      kind === "ipv4"
+        ? newValue
+          ? `已获取新 IPv4 地址 ${newValue}，请重启实例后生效`
+          : "IPv4 已换新，请重启实例后生效"
+        : newValue
+          ? `已获取新 IPv6 路由段 ${newValue}；请重启后从新段配置地址（/64 或 /56），并注意 Network Helper 可能覆盖手工配置`
+          : "IPv6 路由段已换新；请重启后从新段配置地址（/64 或 /56），并注意 Network Helper 可能覆盖手工配置",
       "success",
     );
 
@@ -1418,8 +1698,13 @@ async function handleIpRenewSubmit(event) {
   }
 }
 
-async function loadDetail(instanceId, tokenId, { silent = false } = {}) {
+async function loadDetail(
+  instanceId,
+  tokenId,
+  { silent = false, provider = "linode" } = {},
+) {
   const requestedTokenId = tokenId || null;
+  const requestedProvider = provider === "oracle" ? "oracle" : "linode";
   if (!silent) {
     state.detail.loading = true;
     state.detail.error = null;
@@ -1427,21 +1712,30 @@ async function loadDetail(instanceId, tokenId, { silent = false } = {}) {
   }
 
   try {
-    const [detailResult, ipsResult] = await Promise.allSettled([
-      api.detail(instanceId, requestedTokenId),
-      api.instanceIps(instanceId, requestedTokenId),
-    ]);
+    let detailResult;
+    let ipsResult;
+    if (requestedProvider === "oracle") {
+      const data = await api.oracleDetail(instanceId, requestedTokenId);
+      detailResult = { status: "fulfilled", value: data };
+      ipsResult = { status: "fulfilled", value: null };
+    } else {
+      [detailResult, ipsResult] = await Promise.allSettled([
+        api.detail(instanceId, requestedTokenId),
+        api.instanceIps(instanceId, requestedTokenId),
+      ]);
+    }
     if (detailResult.status !== "fulfilled") {
       throw detailResult.reason;
     }
     const data = detailResult.value;
-    if (ipsResult.status === "fulfilled") {
+    if (requestedProvider !== "oracle" && ipsResult.status === "fulfilled") {
       data.ips = ipsResult.value;
     }
     if (
       !state.detail.open ||
       String(state.detail.id) !== String(instanceId) ||
-      state.detail.tokenId !== requestedTokenId
+      state.detail.tokenId !== requestedTokenId ||
+      state.detail.provider !== requestedProvider
     ) {
       return;
     }
@@ -1453,7 +1747,8 @@ async function loadDetail(instanceId, tokenId, { silent = false } = {}) {
     if (
       !state.detail.open ||
       String(state.detail.id) !== String(instanceId) ||
-      state.detail.tokenId !== requestedTokenId
+      state.detail.tokenId !== requestedTokenId ||
+      state.detail.provider !== requestedProvider
     ) {
       return;
     }
@@ -1472,6 +1767,7 @@ function mergeInstance(instance) {
   const index = state.overview.instances.findIndex(
     (entry) =>
       String(entry.id) === String(instance.id) &&
+      (entry.provider || "linode") === (instance.provider || "linode") &&
       (!instance.tokenId ||
         String(entry.tokenId) === String(instance.tokenId)),
   );
@@ -1483,11 +1779,12 @@ function mergeInstance(instance) {
   }
 }
 
-function openDetail(instanceId, tokenId) {
+function openDetail(instanceId, tokenId, provider = "linode") {
   state.detail = {
     open: true,
     id: String(instanceId),
     tokenId: tokenId || null,
+    provider: provider === "oracle" ? "oracle" : "linode",
     loading: true,
     error: null,
     data: null,
@@ -1495,7 +1792,7 @@ function openDetail(instanceId, tokenId) {
   };
   renderDrawer();
   syncBodyLock();
-  void loadDetail(instanceId, tokenId);
+  void loadDetail(instanceId, tokenId, { provider });
   requestAnimationFrame(() => {
     document.querySelector(".drawer-close")?.focus();
   });
@@ -1507,6 +1804,7 @@ function closeDrawer() {
     open: false,
     id: null,
     tokenId: null,
+    provider: "linode",
     loading: false,
     error: null,
     data: null,
@@ -1531,7 +1829,9 @@ function renderDrawer() {
 async function runInstanceAction(instanceId, operation, tokenId) {
   const instance =
     state.overview?.instances?.find(
-      (entry) => String(entry.id) === String(instanceId),
+      (entry) =>
+        String(entry.id) === String(instanceId) &&
+        (!tokenId || String(entry.tokenId) === String(tokenId)),
     ) || state.detail.data?.instance;
   if (!instance || isTransitional(instance.status)) {
     return;
@@ -1546,16 +1846,23 @@ async function runInstanceAction(instanceId, operation, tokenId) {
   refreshCurrentSurface();
 
   try {
-    await api.action(instanceId, operation, tokenId);
+    if (instance.provider === "oracle") {
+      await api.oracleAction(instanceId, operation, instance.accountId || tokenId);
+    } else {
+      await api.action(instanceId, operation, tokenId);
+    }
     showToast(`已向 ${instance.label || instanceId} 发送${operationLabel}请求`, "success");
     await loadOverview({ silent: true, suppressRender: true });
     if (state.detail.open && String(state.detail.id) === String(instanceId)) {
-      await loadDetail(instanceId, tokenId, { silent: true });
+      await loadDetail(instanceId, tokenId, {
+        silent: true,
+        provider: instance.provider,
+      });
     } else if (state.view !== "create") {
       renderView();
     }
     setTimeout(() => {
-      void refreshAfterAction(instanceId, tokenId);
+      void refreshAfterAction(instanceId, tokenId, instance.provider);
     }, 4_000);
   } catch (error) {
     showToast(friendlyError(error), "error");
@@ -1566,13 +1873,13 @@ async function runInstanceAction(instanceId, operation, tokenId) {
   }
 }
 
-async function refreshAfterAction(instanceId, tokenId) {
+async function refreshAfterAction(instanceId, tokenId, provider = "linode") {
   if (!hasCredentials()) {
     return;
   }
   await loadOverview({ silent: true, suppressRender: true });
   if (state.detail.open && String(state.detail.id) === String(instanceId)) {
-    await loadDetail(instanceId, tokenId, { silent: true });
+    await loadDetail(instanceId, tokenId, { silent: true, provider });
   } else if (state.view !== "create") {
     renderView();
   } else {
@@ -1816,6 +2123,7 @@ function renderConnectionDiagnostic(result) {
   const proxyOk = result.proxy?.ok;
   const tokenOk = result.token?.ok;
   const tokenChecks = Array.isArray(result.tokens) ? result.tokens : [];
+  const oracleChecks = Array.isArray(result.oracles) ? result.oracles : [];
   const item = (label, check, iconName) => `
     <div class="diagnostic-item ${check.ok ? "ok" : "fail"}">
       <span class="diagnostic-item-icon">${icon(check.ok ? "check" : "alert")}</span>
@@ -1833,7 +2141,12 @@ function renderConnectionDiagnostic(result) {
     </div>
     <div class="diagnostic-grid">
       ${item("SOCKS 代理", result.proxy || { ok: true, message: "未启用" }, "network")}
-      ${item("API 令牌", result.token || { ok: false, message: "未配置" }, "key")}
+      ${
+        tokenChecks.length > 0 || !result.oracle?.configured
+          ? item("Linode 令牌", result.token || { ok: false, message: "未配置" }, "key")
+          : ""
+      }
+      ${result.oracle?.configured ? item("Oracle Cloud", result.oracle, "cloud") : ""}
     </div>
     ${
       tokenChecks.length > 1
@@ -1844,6 +2157,21 @@ function renderConnectionDiagnostic(result) {
                   ${icon(token.ok ? "check" : "alert")}
                   <strong>${escapeHtml(token.accountLabel || token.label)}</strong>
                   <small>${escapeHtml(token.message)}${token.latencyMs !== undefined ? ` · ${token.latencyMs} ms` : ""}</small>
+                </span>`,
+              )
+              .join("")}
+          </div>`
+        : ""
+    }
+    ${
+      oracleChecks.length > 0
+        ? `<div class="diagnostic-token-list">
+            ${oracleChecks
+              .map(
+                (account) => `<span class="diagnostic-token${account.ok ? " is-ok" : " is-fail"}">
+                  ${icon(account.ok ? "check" : "alert")}
+                  <strong>${escapeHtml(account.label)}</strong>
+                  <small>${escapeHtml(account.region || "")} · ${escapeHtml(account.message)}${account.latencyMs !== undefined ? ` · ${account.latencyMs} ms` : ""}</small>
                 </span>`,
               )
               .join("")}
@@ -1861,14 +2189,14 @@ async function runConnectionTest(target) {
   const box = document.querySelector("#connection-diagnostic");
   if (box) {
     box.classList.remove("is-hidden");
-    box.innerHTML = `<div class="diagnostic-head"><strong>${spinner()} 正在检查代理与令牌…</strong></div>`;
+    box.innerHTML = `<div class="diagnostic-head"><strong>${spinner()} 正在检查代理与云账户…</strong></div>`;
   }
 
   try {
     const result = await api.testConnection();
     renderConnectionDiagnostic(result);
     showToast(
-      result.ok ? "代理与 API 令牌连接正常" : "连接测试未通过，请查看诊断详情",
+      result.ok ? "代理与云账户连接正常" : "连接测试未通过，请查看诊断详情",
       result.ok ? "success" : "error",
     );
   } catch (error) {
@@ -1907,7 +2235,7 @@ async function testProxySettings(target) {
   if (target) {
     target.disabled = true;
   }
-  showProxyResult("正在通过代理连接 Linode API…", "ok");
+  showProxyResult("正在通过代理连接云 API…", "ok");
   try {
     const result = await api.testProxy({
       enabled: true,
@@ -1959,6 +2287,9 @@ function handleClick(event) {
     case "open-token":
       openTokenModal();
       break;
+    case "open-oracle":
+      openOracleModal();
+      break;
     case "activate-token":
       void activateSettingsToken(target.dataset.id);
       break;
@@ -1970,6 +2301,16 @@ function handleClick(event) {
         (entry) => entry.id === target.dataset.id,
       );
       openDeleteTokenModal(token);
+      break;
+    }
+    case "test-oracle":
+      void testOracleAccount(target.dataset.id);
+      break;
+    case "delete-oracle": {
+      const account = state.settings?.oracleAccounts?.find(
+        (entry) => entry.id === target.dataset.id,
+      );
+      openDeleteOracleModal(account);
       break;
     }
     case "import-env-token":
@@ -2038,13 +2379,19 @@ function handleClick(event) {
       renderView();
       break;
     case "open-detail":
-      openDetail(target.dataset.id, target.dataset.tokenId);
+      openDetail(
+        target.dataset.id,
+        target.dataset.tokenId,
+        target.dataset.provider,
+      );
       break;
     case "close-drawer":
       closeDrawer();
       break;
     case "retry-detail":
-      void loadDetail(target.dataset.id, target.dataset.tokenId);
+      void loadDetail(target.dataset.id, target.dataset.tokenId, {
+        provider: target.dataset.provider,
+      });
       break;
     case "instance-action":
       void runInstanceAction(
@@ -2059,6 +2406,8 @@ function handleClick(event) {
         state.overview?.instances?.find(
           (entry) =>
             String(entry.id) === String(target.dataset.id) &&
+            (entry.provider || "linode") ===
+              (target.dataset.provider || "linode") &&
             (!target.dataset.tokenId ||
               String(entry.tokenId) === String(target.dataset.tokenId)),
         );
@@ -2071,6 +2420,7 @@ function handleClick(event) {
         state.overview?.instances?.find(
           (entry) =>
             String(entry.id) === String(target.dataset.id) &&
+            (entry.provider || "linode") === "linode" &&
             (!target.dataset.tokenId ||
               String(entry.tokenId) === String(target.dataset.tokenId)),
         );
@@ -2091,6 +2441,7 @@ function handleClick(event) {
         state.overview?.instances?.find(
           (entry) =>
             String(entry.id) === String(target.dataset.id) &&
+            (entry.provider || "linode") === "linode" &&
             (!target.dataset.tokenId ||
               String(entry.tokenId) === String(target.dataset.tokenId)),
         );
@@ -2273,6 +2624,10 @@ function handleToggle(event) {
 function handleSubmit(event) {
   if (event.target.id === "token-form") {
     void handleTokenSubmit(event);
+  } else if (event.target.id === "oracle-account-form") {
+    void handleOracleSubmit(event);
+  } else if (event.target.id === "delete-oracle-form") {
+    void handleDeleteOracleSubmit(event);
   } else if (event.target.id === "delete-token-form") {
     void handleDeleteTokenSubmit(event);
   } else if (event.target.id === "proxy-form") {
@@ -2462,7 +2817,7 @@ function bindEvents() {
     if (hasCredentials()) {
       window.location.hash = "#settings";
     } else {
-      openTokenModal();
+      window.location.hash = "#settings";
     }
   });
   window.addEventListener("hashchange", handleHashChange);
@@ -2515,7 +2870,6 @@ async function init() {
     state.loading = false;
     renderView();
     updateShell();
-    openTokenModal();
     startAutoRefresh();
     return;
   }

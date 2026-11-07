@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 
-const CONFIG_VERSION = 1;
+const CONFIG_VERSION = 2;
 const DEFAULT_PROXY = {
   enabled: false,
   url: "socks5h://127.0.0.1:7890",
@@ -38,6 +38,7 @@ function defaultState() {
     version: CONFIG_VERSION,
     activeTokenId: null,
     tokens: [],
+    oracleAccounts: [],
     proxy: { ...DEFAULT_PROXY },
     updatedAt: null,
   };
@@ -188,6 +189,18 @@ export class SettingsStore {
             typeof token.encrypted === "string",
         )
       : [];
+    state.oracleAccounts = Array.isArray(parsed.oracleAccounts)
+      ? parsed.oracleAccounts.filter(
+          (account) =>
+            account &&
+            typeof account.id === "string" &&
+            typeof account.encryptedPrivateKey === "string" &&
+            typeof account.tenancyId === "string" &&
+            typeof account.userId === "string" &&
+            typeof account.fingerprint === "string" &&
+            typeof account.region === "string",
+        )
+      : [];
     state.proxy = {
       ...DEFAULT_PROXY,
       ...(parsed.proxy && typeof parsed.proxy === "object" ? parsed.proxy : {}),
@@ -312,6 +325,18 @@ export class SettingsStore {
         active: true,
       });
     }
+    const oracleAccounts = this.state.oracleAccounts.map((account) => ({
+      id: account.id,
+      label: account.label,
+      tenancyId: account.tenancyId,
+      userId: account.userId,
+      fingerprint: account.fingerprint,
+      region: account.region,
+      compartmentId: account.compartmentId || "",
+      maskedPrivateKey: account.maskedPrivateKey || "••••••••",
+      createdAt: account.createdAt || null,
+      lastVerifiedAt: account.lastVerifiedAt || null,
+    }));
 
     return {
       tokenConfigured: Boolean(credential.token),
@@ -330,6 +355,8 @@ export class SettingsStore {
         lastVerifiedAt: token.lastVerifiedAt || null,
         active: token.id === this.state.activeTokenId,
       })),
+      oracleConfigured: oracleAccounts.length > 0,
+      oracleAccounts,
       proxy: {
         enabled: this.state.proxy.enabled === true,
         url: publicProxyUrl(this.state.proxy.url || DEFAULT_PROXY.url),
@@ -353,6 +380,130 @@ export class SettingsStore {
 
   getEnvToken() {
     return this.envToken;
+  }
+
+  getOracleAccounts() {
+    return this.state.oracleAccounts.map((account) => ({
+      id: account.id,
+      label: account.label,
+      tenancyId: account.tenancyId,
+      userId: account.userId,
+      fingerprint: account.fingerprint,
+      region: account.region,
+      compartmentId: account.compartmentId || "",
+      privateKey: decrypt(account.encryptedPrivateKey, this.key),
+      createdAt: account.createdAt || null,
+      lastVerifiedAt: account.lastVerifiedAt || null,
+    }));
+  }
+
+  getOracleAccountById(id) {
+    const account = this.state.oracleAccounts.find((entry) => entry.id === id);
+    if (!account) {
+      throw new SettingsStoreError(
+        "ORACLE_ACCOUNT_NOT_FOUND",
+        "The selected Oracle Cloud account does not exist.",
+        404,
+      );
+    }
+    return {
+      id: account.id,
+      label: account.label,
+      tenancyId: account.tenancyId,
+      userId: account.userId,
+      fingerprint: account.fingerprint,
+      region: account.region,
+      compartmentId: account.compartmentId || "",
+      privateKey: decrypt(account.encryptedPrivateKey, this.key),
+      createdAt: account.createdAt || null,
+      lastVerifiedAt: account.lastVerifiedAt || null,
+    };
+  }
+
+  addOracleAccount({
+    label,
+    tenancyId,
+    userId,
+    fingerprint,
+    region,
+    compartmentId = "",
+    privateKey,
+    accountLabel = "",
+  }) {
+    const value = String(privateKey || "").trim();
+    if (!value) {
+      throw new SettingsStoreError(
+        "ORACLE_PRIVATE_KEY_REQUIRED",
+        "An Oracle API private key is required.",
+        400,
+      );
+    }
+    if (value.length > 32_768) {
+      throw new SettingsStoreError(
+        "ORACLE_PRIVATE_KEY_TOO_LONG",
+        "The Oracle API private key is too long.",
+        400,
+      );
+    }
+
+    const identity = `${tenancyId}\n${userId}\n${fingerprint}`;
+    const fingerprintHash = tokenFingerprint(identity);
+    if (
+      this.state.oracleAccounts.some(
+        (entry) => entry.identityFingerprint === fingerprintHash,
+      )
+    ) {
+      throw new SettingsStoreError(
+        "DUPLICATE_ORACLE_ACCOUNT",
+        "This Oracle Cloud account is already saved.",
+        409,
+      );
+    }
+
+    const record = {
+      id: randomUUID(),
+      label: normalizeLabel(
+        label,
+        accountLabel || `Oracle · ${region || "OCI"}`,
+      ),
+      tenancyId: String(tenancyId || "").slice(0, 512),
+      userId: String(userId || "").slice(0, 512),
+      fingerprint: String(fingerprint || "").slice(0, 64),
+      region: String(region || "").slice(0, 64),
+      compartmentId: String(compartmentId || "").slice(0, 512),
+      maskedPrivateKey: "•••••••• RSA KEY",
+      identityFingerprint: fingerprintHash,
+      encryptedPrivateKey: encrypt(value, this.key),
+      createdAt: new Date().toISOString(),
+      lastVerifiedAt: new Date().toISOString(),
+    };
+    this.state.oracleAccounts.unshift(record);
+    this.save();
+    return record.id;
+  }
+
+  removeOracleAccount(id) {
+    const before = this.state.oracleAccounts.length;
+    this.state.oracleAccounts = this.state.oracleAccounts.filter(
+      (account) => account.id !== id,
+    );
+    if (this.state.oracleAccounts.length === before) {
+      throw new SettingsStoreError(
+        "ORACLE_ACCOUNT_NOT_FOUND",
+        "The selected Oracle Cloud account does not exist.",
+        404,
+      );
+    }
+    this.save();
+  }
+
+  recordOracleVerification(id) {
+    const account = this.state.oracleAccounts.find((entry) => entry.id === id);
+    if (!account) {
+      return;
+    }
+    account.lastVerifiedAt = new Date().toISOString();
+    this.save();
   }
 
   addToken({ label, token, accountLabel = "" }) {
