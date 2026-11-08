@@ -555,6 +555,9 @@ function Update-App {
     param([pscustomobject]$Config)
     $oldVersion = Get-AppVersion -Config $Config
     $wasRunning = Test-AppHealth -Config $Config
+    if ($wasRunning -and -not (Get-RunningProcess)) {
+        throw "服务正在运行，但不是由 cloudvm 启动。请先停止该进程，再执行 cloudvm update。"
+    }
     if ($wasRunning) {
         Stop-App -Config $Config
     }
