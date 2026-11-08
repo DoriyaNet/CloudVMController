@@ -587,19 +587,23 @@ update_from_archive() {
 
 update_from_git() {
     local git_bin
+    local git_config=()
     local status
     git_bin="$(command -v git 2>/dev/null || true)"
     [[ -n "$git_bin" ]] || die "未找到 git，无法从 Git 仓库更新"
+    if [[ -n "$PROXY" ]]; then
+        git_config=(-c "http.proxy=$PROXY" -c "https.proxy=$PROXY")
+    fi
     status="$("$git_bin" -C "$CLOUDVM_APP_DIR" status --porcelain)"
     if [[ -n "$status" && "$FORCE" -eq 0 ]]; then
         die "安装目录存在未提交的修改。请先提交、暂存或使用 cloudvm update --force。"
     fi
     info "从 Git 更新 $CLOUDVM_BRANCH..."
-    "$git_bin" -C "$CLOUDVM_APP_DIR" fetch origin "$CLOUDVM_BRANCH"
+    "$git_bin" "${git_config[@]}" -C "$CLOUDVM_APP_DIR" fetch origin "$CLOUDVM_BRANCH"
     if [[ "$FORCE" -eq 1 ]]; then
-        "$git_bin" -C "$CLOUDVM_APP_DIR" reset --hard "origin/$CLOUDVM_BRANCH"
+        "$git_bin" "${git_config[@]}" -C "$CLOUDVM_APP_DIR" reset --hard "origin/$CLOUDVM_BRANCH"
     else
-        "$git_bin" -C "$CLOUDVM_APP_DIR" pull --ff-only origin "$CLOUDVM_BRANCH"
+        "$git_bin" "${git_config[@]}" -C "$CLOUDVM_APP_DIR" pull --ff-only origin "$CLOUDVM_BRANCH"
     fi
 }
 
