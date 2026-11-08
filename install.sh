@@ -317,14 +317,14 @@ install_portable_node() {
     esac
     temp_root="$(new_temp)"
     sums="$temp_root/SHASUMS256.txt"
-    info "未找到 Node.js 20+，准备下载便携版 Node.js..."
+    info "未找到 Node.js 20+，准备下载便携版 Node.js..." >&2
     download_file "https://nodejs.org/dist/latest/SHASUMS256.txt" "$sums"
     line="$(grep "linux-$node_arch.tar.gz" "$sums" | head -n 1)"
     [[ -n "$line" ]] || die "无法在 Node.js 校验文件中找到 linux-$node_arch 安装包"
     read -r expected filename <<< "$line"
     expected="$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')"
     archive="$temp_root/$filename"
-    info "下载 $filename..."
+    info "下载 $filename..." >&2
     download_file "https://nodejs.org/dist/latest/$filename" "$archive"
     actual="$(sha256_file "$archive")"
     [[ "$actual" = "$expected" ]] || die "Node.js 安装包 SHA256 校验失败"
