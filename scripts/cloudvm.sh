@@ -153,24 +153,16 @@ if [[ -z "$CLOUDVM_INSTALL_MODE" ]]; then
     fi
 fi
 
-TMP_DIRS=()
+TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cloudvm-cli.XXXXXX")"
 cleanup() {
-    local dir
-    if [[ ${#TMP_DIRS[@]} -gt 0 ]]; then
-        for dir in "${TMP_DIRS[@]}"; do
-            if [[ -n "$dir" ]]; then
-                rm -rf "$dir"
-            fi
-        done
+    if [[ -n "${TEMP_ROOT:-}" && -d "$TEMP_ROOT" ]]; then
+        rm -rf "$TEMP_ROOT"
     fi
 }
 trap cleanup EXIT
 
 new_temp() {
-    local dir
-    dir="$(mktemp -d)"
-    TMP_DIRS+=("$dir")
-    printf '%s' "$dir"
+    mktemp -d "$TEMP_ROOT/work.XXXXXX"
 }
 
 download_file() {
