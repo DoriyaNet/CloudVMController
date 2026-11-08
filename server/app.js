@@ -12,6 +12,10 @@ import {
 import {
   OracleClient,
   OracleError,
+  buildOracleInstanceCreatePayload,
+  isOracleBootVolumeBackupId,
+  isOracleConsoleConnectionId,
+  isOracleConsoleHistoryId,
   isOracleInstanceId,
   normalizeOracleAccountInput,
   normalizeOracleInstance,
@@ -766,6 +770,84 @@ function oracleAccountSummary(account) {
   };
 }
 
+function resolveOracleAccount(
+  settingsStore,
+  proxy,
+  accountId,
+  endpointResolver,
+) {
+  const accounts = settingsStore.getOracleAccounts();
+  if (accounts.length === 0) {
+    throw new HttpError(
+      401,
+      "Connect an Oracle Cloud account to continue.",
+      "ORACLE_ACCOUNT_REQUIRED",
+    );
+  }
+
+  const requestedId = cleanString(accountId, { maxLength: 128 });
+  const account = requestedId
+    ? accounts.find((entry) => entry.id === requestedId)
+    : accounts[0];
+  if (!account) {
+    throw new HttpError(
+      404,
+      "The selected Oracle Cloud account does not exist.",
+      "ORACLE_ACCOUNT_NOT_FOUND",
+    );
+  }
+  return {
+    account,
+    client: createOracleCredentialClient(account, proxy, endpointResolver),
+  };
+}
+
+async function oracleSectionResult(promise, fallback) {
+  try {
+    return await promise;
+  } catch (error) {
+    if (
+      error instanceof OracleError &&
+      [400, 403, 404, 409].includes(error.status)
+    ) {
+      return {
+        ...fallback(),
+        error: error.message,
+      };
+    }
+    throw error;
+  }
+}
+
+async function buildOracleBackups(client, instance) {
+  const bootVolume = await client.getBootVolumeForInstance(instance);
+  const backups = await client.listBootVolumeBackups(
+    instance,
+    bootVolume.id,
+  );
+  return {
+    bootVolume,
+    backups,
+    emptyReason:
+      backups.length === 0
+        ? "该启动卷还没有手工备份。备份创建后可能需要数分钟到数小时才可用。"
+        : "",
+  };
+}
+
+async function buildOracleConsole(client, instance) {
+  const [connections, histories] = await Promise.all([
+    client.listConsoleConnections(instance),
+    client.listConsoleHistories(instance),
+  ]);
+  return {
+    connections,
+    histories,
+    publicKeyHint:
+      "OCI 串口连接只接受 RSA 公钥。连接串需在本地使用对应私钥建立 SSH/VNC 隧道，浏览器内不会建立未审计的交互终端。",
+  };
+}
+
 async function resolveOracleTarget(
   settingsStore,
   proxy,
@@ -827,17 +909,60 @@ async function resolveOracleTarget(
 
 async function buildOracleDetail(target) {
   const { account, client, instance } = target;
-  let ips;
+  const [ipsResult, metricsResult, backupsResult, consoleResult] =
+    await Promise.allSettled([
+      client.getInstanceIps(instance),
+      client.getMetrics(instance, "24h"),
+      buildOracleBackups(client, instance),
+      buildOracleConsole(client, instance),
+    ]);
+
+  let ips = null;
   let ipsError = null;
-  try {
-    ips = await client.getInstanceIps(instance);
-  } catch (error) {
-    if (error instanceof OracleError && error.status === 403) {
-      ipsError = "当前 OCI 凭据没有读取 VNIC 的权限。";
-    } else {
-      throw error;
-    }
+  if (ipsResult.status === "fulfilled") {
+    ips = ipsResult.value;
+  } else if (
+    ipsResult.reason instanceof OracleError &&
+    ipsResult.reason.status === 403
+  ) {
+    ipsError = "当前 OCI 凭据没有读取 VNIC 的权限。";
+  } else {
+    throw ipsResult.reason;
   }
+
+  const oracleMetrics =
+    metricsResult.status === "fulfilled"
+      ? metricsResult.value
+      : {
+          available: false,
+          window: "24h",
+          resolution: "5m",
+          metrics: [],
+          errors: [],
+          emptyReason: cleanString(metricsResult.reason?.message, {
+            maxLength: 500,
+          }),
+        };
+  const oracleBackups = await oracleSectionResult(
+    backupsResult.status === "fulfilled"
+      ? Promise.resolve(backupsResult.value)
+      : Promise.reject(backupsResult.reason),
+    () => ({
+      bootVolume: null,
+      backups: [],
+      emptyReason: "启动卷备份信息不可用。",
+    }),
+  );
+  const oracleConsole = await oracleSectionResult(
+    consoleResult.status === "fulfilled"
+      ? Promise.resolve(consoleResult.value)
+      : Promise.reject(consoleResult.reason),
+    () => ({
+      connections: [],
+      histories: [],
+      publicKeyHint: "",
+    }),
+  );
 
   return {
     provider: "oracle",
@@ -846,12 +971,122 @@ async function buildOracleDetail(target) {
     stats: null,
     backups: null,
     events: [],
-    ips: ips || null,
+    ips,
     ipsError,
+    oracleMetrics,
+    oracleBackups,
+    oracleConsole,
     tokenId: account.id,
     tokenLabel: account.label,
     accountLabel: account.label,
     account: oracleAccountSummary(account),
+  };
+}
+
+function optionError(error) {
+  return cleanString(error?.message, { maxLength: 500 }) || "读取失败。";
+}
+
+async function buildOracleCreateOptions({
+  account,
+  client,
+  compartmentId,
+  availabilityDomain,
+}) {
+  const [compartments, domains] = await Promise.all([
+    client.listCompartmentsForCreate(),
+    client.listAvailabilityDomains(),
+  ]);
+  if (domains.length === 0) {
+    throw new HttpError(
+      404,
+      "No Oracle availability domains were returned for this tenancy.",
+      "ORACLE_AD_NOT_FOUND",
+    );
+  }
+
+  const requestedCompartmentId = cleanString(compartmentId, { maxLength: 512 });
+  const selectedCompartmentId =
+    compartments.find((entry) => entry.id === requestedCompartmentId)?.id ||
+    account.compartmentId ||
+    compartments[0]?.id ||
+    account.tenancyId;
+  const requestedAvailabilityDomain = cleanString(availabilityDomain, {
+    maxLength: 128,
+  });
+  const selectedAvailabilityDomain =
+    domains.find(
+      (domain) => domain.name === requestedAvailabilityDomain,
+    )?.name || domains[0].name;
+
+  const imageCompartmentIds = [
+    ...new Set([account.tenancyId, selectedCompartmentId].filter(Boolean)),
+  ];
+  const resources = await Promise.allSettled([
+    client.listShapes(selectedCompartmentId, selectedAvailabilityDomain),
+    ...imageCompartmentIds.map((compartmentId) =>
+      client.listImages(compartmentId),
+    ),
+    client.listVcns(selectedCompartmentId),
+    client.listSubnets(selectedCompartmentId),
+  ]);
+  const errors = [];
+  const empty = [];
+  const readResource = (index, label) => {
+    const result = resources[index];
+    if (result.status === "fulfilled") {
+      return result.value;
+    }
+    errors.push(`${label}：${optionError(result.reason)}`);
+    return [];
+  };
+  const shapes = readResource(0, "Shapes");
+  const images = [];
+  imageCompartmentIds.forEach((compartmentId, index) => {
+    const result = resources[index + 1];
+    if (result.status === "rejected") {
+      errors.push(
+        `Images (${compartmentId === account.tenancyId ? "Tenancy" : "Compartment"})：${optionError(result.reason)}`,
+      );
+      return;
+    }
+    images.push(...result.value);
+  });
+  const mergedImages = images.filter(
+    (image, index, entries) =>
+      entries.findIndex((entry) => entry.id === image.id) === index,
+  );
+  const resourceOffset = imageCompartmentIds.length;
+  const vcns = readResource(resourceOffset + 1, "VCNs");
+  const subnets = readResource(resourceOffset + 2, "Subnets");
+  for (const [label, values] of [
+    ["Shapes", shapes],
+    ["Images", mergedImages],
+    ["VCNs", vcns],
+    ["Subnets", subnets],
+  ]) {
+    if (values.length === 0 && !errors.some((entry) => entry.startsWith(label))) {
+      empty.push(label);
+    }
+  }
+
+  return {
+    account: oracleAccountSummary(account),
+    compartments,
+    availabilityDomains: domains,
+    selectedCompartmentId,
+    selectedAvailabilityDomain,
+    shapes,
+    images: mergedImages,
+    vcns,
+    subnets: subnets.filter(
+      (subnet) =>
+        !["TERMINATING", "TERMINATED"].includes(
+          String(subnet.lifecycleState || "").toUpperCase(),
+        ),
+    ),
+    errors,
+    empty,
   };
 }
 
@@ -1565,7 +1800,7 @@ function createRouter({
       return;
     }
 
-    if (pathname === "/api/oracle/instances") {
+    if (pathname === "/api/oracle/create-options") {
       if (request.method !== "GET") {
         methodNotAllowed(response, ["GET"]);
         return;
@@ -1576,6 +1811,62 @@ function createRouter({
           "Connect an Oracle Cloud account to continue.",
           "ORACLE_ACCOUNT_REQUIRED",
         );
+      }
+      const accountId = url.searchParams.get("accountId");
+      const { account, client } = resolveOracleAccount(
+        settingsStore,
+        proxy,
+        accountId,
+        oracleEndpointResolver,
+      );
+      sendJson(
+        response,
+        200,
+        await buildOracleCreateOptions({
+          account,
+          client,
+          compartmentId: url.searchParams.get("compartmentId"),
+          availabilityDomain: url.searchParams.get("availabilityDomain"),
+        }),
+      );
+      return;
+    }
+
+    if (pathname === "/api/oracle/instances") {
+      if (!["GET", "POST"].includes(request.method)) {
+        methodNotAllowed(response, ["GET", "POST"]);
+        return;
+      }
+      if (oracleEntries.length === 0) {
+        throw new HttpError(
+          401,
+          "Connect an Oracle Cloud account to continue.",
+          "ORACLE_ACCOUNT_REQUIRED",
+        );
+      }
+      if (request.method === "POST") {
+        const body = await readJsonBody(request);
+        const { account, client } = resolveOracleAccount(
+          settingsStore,
+          proxy,
+          body.accountId,
+          oracleEndpointResolver,
+        );
+        const payload = buildOracleInstanceCreatePayload(body);
+        const instance = await client.createInstance(payload);
+        sendJson(response, 202, {
+          ok: true,
+          provider: "oracle",
+          accountId: account.id,
+          accountLabel: account.label,
+          instance: instance
+            ? annotateOracleInstance(instance, account)
+            : null,
+          warnings: [
+            "OCI 实例创建是异步操作，实例可能先处于 PROVISIONING。稍后刷新即可查看最新状态。",
+          ],
+        });
+        return;
       }
 
       const accountId = cleanString(url.searchParams.get("accountId"), {
@@ -1644,6 +1935,373 @@ function createRouter({
       return;
     }
 
+    const oracleMetricsMatch = pathname.match(
+      /^\/api\/oracle\/instances\/([^/]+)\/metrics$/,
+    );
+    if (oracleMetricsMatch) {
+      if (request.method !== "GET") {
+        methodNotAllowed(response, ["GET"]);
+        return;
+      }
+      const instanceId = decodeURIComponent(oracleMetricsMatch[1]);
+      if (!isOracleInstanceId(instanceId)) {
+        throw new HttpError(
+          400,
+          "Invalid Oracle instance OCID.",
+          "INVALID_ORACLE_INSTANCE_ID",
+        );
+      }
+      const target = await resolveOracleTarget(
+        settingsStore,
+        proxy,
+        instanceId,
+        url.searchParams.get("accountId"),
+        oracleEndpointResolver,
+      );
+      sendJson(
+        response,
+        200,
+        await target.client.getMetrics(
+          target.instance,
+          cleanString(url.searchParams.get("window"), { maxLength: 8 }) ||
+            "24h",
+        ),
+      );
+      return;
+    }
+
+    const oracleBackupsMatch = pathname.match(
+      /^\/api\/oracle\/instances\/([^/]+)\/backups$/,
+    );
+    if (oracleBackupsMatch) {
+      if (!["GET", "POST"].includes(request.method)) {
+        methodNotAllowed(response, ["GET", "POST"]);
+        return;
+      }
+      const instanceId = decodeURIComponent(oracleBackupsMatch[1]);
+      if (!isOracleInstanceId(instanceId)) {
+        throw new HttpError(
+          400,
+          "Invalid Oracle instance OCID.",
+          "INVALID_ORACLE_INSTANCE_ID",
+        );
+      }
+      const target = await resolveOracleTarget(
+        settingsStore,
+        proxy,
+        instanceId,
+        url.searchParams.get("accountId"),
+        oracleEndpointResolver,
+      );
+      if (request.method === "GET") {
+        sendJson(
+          response,
+          200,
+          await buildOracleBackups(target.client, target.instance),
+        );
+        return;
+      }
+      const body = await readJsonBody(request);
+      const bootVolume = await target.client.getBootVolumeForInstance(
+        target.instance,
+      );
+      const backup = await target.client.createBootVolumeBackup(
+        bootVolume.id,
+        {
+          displayName: body.displayName,
+          type: body.type,
+        },
+      );
+      sendJson(response, 201, {
+        ok: true,
+        bootVolume,
+        backup,
+        warning:
+          "备份创建是异步操作，可能需要数分钟到数小时；创建期间启动卷不能删除。",
+      });
+      return;
+    }
+
+    const oracleBackupDeleteMatch = pathname.match(
+      /^\/api\/oracle\/instances\/([^/]+)\/backups\/([^/]+)$/,
+    );
+    if (oracleBackupDeleteMatch) {
+      if (request.method !== "DELETE") {
+        methodNotAllowed(response, ["DELETE"]);
+        return;
+      }
+      const instanceId = decodeURIComponent(oracleBackupDeleteMatch[1]);
+      const backupId = decodeURIComponent(oracleBackupDeleteMatch[2]);
+      if (!isOracleInstanceId(instanceId)) {
+        throw new HttpError(
+          400,
+          "Invalid Oracle instance OCID.",
+          "INVALID_ORACLE_INSTANCE_ID",
+        );
+      }
+      if (!isOracleBootVolumeBackupId(backupId)) {
+        throw new HttpError(
+          400,
+          "Invalid Oracle boot volume backup OCID.",
+          "INVALID_ORACLE_BACKUP_ID",
+        );
+      }
+      const target = await resolveOracleTarget(
+        settingsStore,
+        proxy,
+        instanceId,
+        url.searchParams.get("accountId"),
+        oracleEndpointResolver,
+      );
+      await target.client.getOwnedBootVolumeBackup(
+        target.instance,
+        backupId,
+      );
+      await target.client.deleteBootVolumeBackup(backupId);
+      sendJson(response, 200, { ok: true, backupId });
+      return;
+    }
+
+    const oracleConsoleMatch = pathname.match(
+      /^\/api\/oracle\/instances\/([^/]+)\/console$/,
+    );
+    if (oracleConsoleMatch) {
+      if (!["GET", "POST"].includes(request.method)) {
+        methodNotAllowed(response, ["GET", "POST"]);
+        return;
+      }
+      const instanceId = decodeURIComponent(oracleConsoleMatch[1]);
+      if (!isOracleInstanceId(instanceId)) {
+        throw new HttpError(
+          400,
+          "Invalid Oracle instance OCID.",
+          "INVALID_ORACLE_INSTANCE_ID",
+        );
+      }
+      const target = await resolveOracleTarget(
+        settingsStore,
+        proxy,
+        instanceId,
+        url.searchParams.get("accountId"),
+        oracleEndpointResolver,
+      );
+      if (request.method === "GET") {
+        sendJson(
+          response,
+          200,
+          await buildOracleConsole(target.client, target.instance),
+        );
+        return;
+      }
+      const body = await readJsonBody(request);
+      const connection = await target.client.createConsoleConnection(
+        instanceId,
+        body.publicKey,
+      );
+      sendJson(response, 201, {
+        ok: true,
+        connection,
+        note: "使用连接串与本机 RSA 私钥建立 SSH/VNC 隧道；浏览器不会保存私钥。",
+      });
+      return;
+    }
+
+    const oracleConsoleConnectionMatch = pathname.match(
+      /^\/api\/oracle\/instances\/([^/]+)\/console\/connections\/([^/]+)$/,
+    );
+    if (oracleConsoleConnectionMatch) {
+      if (request.method !== "DELETE") {
+        methodNotAllowed(response, ["DELETE"]);
+        return;
+      }
+      const instanceId = decodeURIComponent(
+        oracleConsoleConnectionMatch[1],
+      );
+      const connectionId = decodeURIComponent(
+        oracleConsoleConnectionMatch[2],
+      );
+      if (!isOracleInstanceId(instanceId)) {
+        throw new HttpError(
+          400,
+          "Invalid Oracle instance OCID.",
+          "INVALID_ORACLE_INSTANCE_ID",
+        );
+      }
+      if (!isOracleConsoleConnectionId(connectionId)) {
+        throw new HttpError(
+          400,
+          "Invalid Oracle console connection OCID.",
+          "INVALID_ORACLE_CONSOLE_CONNECTION_ID",
+        );
+      }
+      const target = await resolveOracleTarget(
+        settingsStore,
+        proxy,
+        instanceId,
+        url.searchParams.get("accountId"),
+        oracleEndpointResolver,
+      );
+      const connections = await target.client.listConsoleConnections(
+        target.instance,
+      );
+      if (!connections.some((entry) => entry.id === connectionId)) {
+        throw new HttpError(
+          404,
+          "The console connection does not belong to the target instance.",
+          "ORACLE_CONSOLE_CONNECTION_NOT_FOUND",
+        );
+      }
+      await target.client.deleteConsoleConnection(connectionId);
+      sendJson(response, 200, { ok: true, connectionId });
+      return;
+    }
+
+    const oracleConsoleHistoriesMatch = pathname.match(
+      /^\/api\/oracle\/instances\/([^/]+)\/console\/histories$/,
+    );
+    if (oracleConsoleHistoriesMatch) {
+      if (request.method !== "POST") {
+        methodNotAllowed(response, ["POST"]);
+        return;
+      }
+      const instanceId = decodeURIComponent(
+        oracleConsoleHistoriesMatch[1],
+      );
+      if (!isOracleInstanceId(instanceId)) {
+        throw new HttpError(
+          400,
+          "Invalid Oracle instance OCID.",
+          "INVALID_ORACLE_INSTANCE_ID",
+        );
+      }
+      const target = await resolveOracleTarget(
+        settingsStore,
+        proxy,
+        instanceId,
+        url.searchParams.get("accountId"),
+        oracleEndpointResolver,
+      );
+      const body = await readJsonBody(request);
+      const history = await target.client.createConsoleHistory(
+        instanceId,
+        body.displayName,
+      );
+      sendJson(response, 201, {
+        ok: true,
+        history,
+        note: "控制台历史创建后需要等待状态变为 SUCCEEDED 才能读取。",
+      });
+      return;
+    }
+
+    const oracleConsoleHistoryDataMatch = pathname.match(
+      /^\/api\/oracle\/instances\/([^/]+)\/console\/histories\/([^/]+)\/data$/,
+    );
+    if (oracleConsoleHistoryDataMatch) {
+      if (request.method !== "GET") {
+        methodNotAllowed(response, ["GET"]);
+        return;
+      }
+      const instanceId = decodeURIComponent(
+        oracleConsoleHistoryDataMatch[1],
+      );
+      const historyId = decodeURIComponent(
+        oracleConsoleHistoryDataMatch[2],
+      );
+      if (!isOracleInstanceId(instanceId)) {
+        throw new HttpError(
+          400,
+          "Invalid Oracle instance OCID.",
+          "INVALID_ORACLE_INSTANCE_ID",
+        );
+      }
+      if (!isOracleConsoleHistoryId(historyId)) {
+        throw new HttpError(
+          400,
+          "Invalid Oracle console history OCID.",
+          "INVALID_ORACLE_CONSOLE_HISTORY_ID",
+        );
+      }
+      const target = await resolveOracleTarget(
+        settingsStore,
+        proxy,
+        instanceId,
+        url.searchParams.get("accountId"),
+        oracleEndpointResolver,
+      );
+      const histories = await target.client.listConsoleHistories(
+        target.instance,
+      );
+      if (!histories.some((entry) => entry.id === historyId)) {
+        throw new HttpError(
+          404,
+          "The console history does not belong to the target instance.",
+          "ORACLE_CONSOLE_HISTORY_NOT_FOUND",
+        );
+      }
+      const text = await target.client.getConsoleHistoryData(historyId, {
+        offset: url.searchParams.get("offset"),
+        length: url.searchParams.get("length"),
+      });
+      sendJson(response, 200, {
+        ok: true,
+        instanceId,
+        historyId,
+        offset: Number(url.searchParams.get("offset") || 0),
+        length: Number(url.searchParams.get("length") || 32_768),
+        text: typeof text === "string" ? text : "",
+      });
+      return;
+    }
+
+    const oracleConsoleHistoryMatch = pathname.match(
+      /^\/api\/oracle\/instances\/([^/]+)\/console\/histories\/([^/]+)$/,
+    );
+    if (oracleConsoleHistoryMatch) {
+      if (request.method !== "DELETE") {
+        methodNotAllowed(response, ["DELETE"]);
+        return;
+      }
+      const instanceId = decodeURIComponent(
+        oracleConsoleHistoryMatch[1],
+      );
+      const historyId = decodeURIComponent(oracleConsoleHistoryMatch[2]);
+      if (!isOracleInstanceId(instanceId)) {
+        throw new HttpError(
+          400,
+          "Invalid Oracle instance OCID.",
+          "INVALID_ORACLE_INSTANCE_ID",
+        );
+      }
+      if (!isOracleConsoleHistoryId(historyId)) {
+        throw new HttpError(
+          400,
+          "Invalid Oracle console history OCID.",
+          "INVALID_ORACLE_CONSOLE_HISTORY_ID",
+        );
+      }
+      const target = await resolveOracleTarget(
+        settingsStore,
+        proxy,
+        instanceId,
+        url.searchParams.get("accountId"),
+        oracleEndpointResolver,
+      );
+      const histories = await target.client.listConsoleHistories(
+        target.instance,
+      );
+      if (!histories.some((entry) => entry.id === historyId)) {
+        throw new HttpError(
+          404,
+          "The console history does not belong to the target instance.",
+          "ORACLE_CONSOLE_HISTORY_NOT_FOUND",
+        );
+      }
+      await target.client.deleteConsoleHistory(historyId);
+      sendJson(response, 200, { ok: true, historyId });
+      return;
+    }
+
     const oracleActionMatch = pathname.match(
       /^\/api\/oracle\/instances\/([^/]+)\/actions\/([a-z-]+)$/,
     );
@@ -1699,8 +2357,8 @@ function createRouter({
       /^\/api\/oracle\/instances\/([^/]+)$/,
     );
     if (oracleInstanceMatch) {
-      if (request.method !== "GET") {
-        methodNotAllowed(response, ["GET"]);
+      if (!["GET", "DELETE"].includes(request.method)) {
+        methodNotAllowed(response, ["GET", "DELETE"]);
         return;
       }
       const instanceId = oracleInstanceMatch[1];
@@ -1718,7 +2376,49 @@ function createRouter({
         url.searchParams.get("accountId"),
         oracleEndpointResolver,
       );
-      sendJson(response, 200, target.instance);
+      if (request.method === "GET") {
+        sendJson(response, 200, target.instance);
+        return;
+      }
+
+      const body = await readJsonBody(request);
+      const confirmation = cleanString(body.confirmation, {
+        maxLength: 255,
+      });
+      if (
+        !confirmation ||
+        confirmation !==
+          (target.instance.label || target.instance.displayName || "")
+      ) {
+        throw new HttpError(
+          400,
+          "Instance name confirmation does not match.",
+          "ORACLE_TERMINATION_CONFIRMATION_REQUIRED",
+        );
+      }
+      if (
+        ["TERMINATING", "TERMINATED"].includes(
+          String(target.instance.providerStatus || "").toUpperCase(),
+        )
+      ) {
+        throw new HttpError(
+          409,
+          "The Oracle instance is already terminating.",
+          "ORACLE_INSTANCE_TERMINATING",
+        );
+      }
+      await target.client.terminateInstance(instanceId, {
+        preserveBootVolume: body.preserveBootVolume === true,
+        preserveDataVolumesCreatedAtLaunch:
+          body.preserveDataVolumes === true,
+      });
+      sendJson(response, 202, {
+        ok: true,
+        provider: "oracle",
+        instanceId,
+        preserveBootVolume: body.preserveBootVolume === true,
+        preserveDataVolumes: body.preserveDataVolumes === true,
+      });
       return;
     }
 

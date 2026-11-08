@@ -1,5 +1,10 @@
 import { ApiError, createApi } from "./api.js";
 import { icon, mountIcons } from "./icons.js";
+import {
+  oracleRegionGroups,
+  oracleRegionLabel,
+  oracleRegionOptionText,
+} from "./oracle-regions.js";
 import { enhanceSelects } from "./select.js";
 import {
   copyToClipboard,
@@ -24,9 +29,16 @@ import {
   renderIpSwapModal,
   renderInstances,
   renderInstancesSkeleton,
+  renderOracleBackupDeleteModal,
+  renderOracleBackupModal,
+  renderOracleConsoleModal,
+  renderOracleCreate,
+  renderOracleCreateSkeleton,
+  renderOracleTerminateModal,
   renderOverview,
   renderOverviewSkeleton,
   renderSettings,
+  renderCreateProviderSwitch,
 } from "./views.js";
 
 const PREFS_KEY = "cloudvm:prefs";
@@ -43,6 +55,7 @@ const OPERATION_LABELS = {
   shutdown: "关闭",
   reboot: "重启",
 };
+const CUSTOM_ORACLE_REGION = "__custom__";
 
 function readPreferences() {
   try {
@@ -67,6 +80,7 @@ function savePreferences(preferences) {
 
 function newCreateState() {
   return {
+    provider: "linode",
     tokenId: "",
     label: randomInstanceLabel(),
     region: "",
@@ -81,6 +95,38 @@ function newCreateState() {
     booted: true,
     passwordVisible: false,
     advancedOpen: false,
+  };
+}
+
+function newOracleCreateState() {
+  return {
+    accountId: "",
+    label: randomInstanceLabel(),
+    compartmentId: "",
+    availabilityDomain: "",
+    shape: "",
+    ocpus: "1",
+    memoryInGBs: "6",
+    imageId: "",
+    vcnId: "",
+    subnetId: "",
+    assignPublicIp: true,
+    sshKeys: "",
+    userData: "",
+    options: {
+      loading: false,
+      error: "",
+      account: null,
+      compartments: [],
+      availabilityDomains: [],
+      shapes: [],
+      images: [],
+      vcns: [],
+      subnets: [],
+      resourcesKey: "",
+      empty: [],
+      warnings: [],
+    },
   };
 }
 
@@ -110,9 +156,15 @@ const state = {
     error: null,
     data: null,
     returnFocus: null,
+    oracleMetricsWindow: "24h",
+    oracleMetricsLoading: false,
+    oracleOpsBusy: "",
   },
   modal: null,
   create: newCreateState(),
+  oracleCreate: newOracleCreateState(),
+  oracleCreating: false,
+  oracleCreateError: "",
   availability: {
     loading: false,
     region: "",
@@ -166,6 +218,44 @@ function hasOracleCredentials() {
 
 function hasCredentials() {
   return hasLinodeCredentials() || hasOracleCredentials();
+}
+
+function oracleCreateAccounts() {
+  return Array.isArray(state.settings?.oracleAccounts)
+    ? state.settings.oracleAccounts
+    : [];
+}
+
+function ensureCreateProvider() {
+  const linodeAvailable = hasLinodeCredentials();
+  const oracleAvailable = oracleCreateAccounts().length > 0;
+  if (
+    state.create.provider === "oracle" &&
+    !oracleAvailable
+  ) {
+    state.create.provider = "linode";
+  } else if (
+    state.create.provider !== "oracle" &&
+    !linodeAvailable &&
+    oracleAvailable
+  ) {
+    state.create.provider = "oracle";
+  }
+  if (!["linode", "oracle"].includes(state.create.provider)) {
+    state.create.provider = oracleAvailable ? "oracle" : "linode";
+  }
+}
+
+function ensureOracleCreateAccount() {
+  const accounts = oracleCreateAccounts();
+  if (
+    !accounts.some((account) => account.id === state.oracleCreate.accountId)
+  ) {
+    state.oracleCreate.accountId = accounts[0]?.id || "";
+  }
+  return accounts.find(
+    (account) => account.id === state.oracleCreate.accountId,
+  ) || null;
 }
 
 function accountName(account) {
@@ -395,6 +485,29 @@ function renderView() {
   }
 
   if (state.view === "create") {
+    ensureCreateProvider();
+    if (
+      state.create.provider === "linode" &&
+      !hasLinodeCredentials() &&
+      oracleCreateAccounts().length > 0
+    ) {
+      state.create.provider = "oracle";
+    }
+    if (state.create.provider === "oracle") {
+      if (!hasOracleCredentials()) {
+        paintView(renderCreateUnavailable(state));
+        return;
+      }
+      ensureOracleCreateSelections();
+      paintView(
+        state.oracleCreate.options.resourcesKey ||
+          state.oracleCreate.options.loading ||
+          state.oracleCreate.options.error
+          ? renderOracleCreate(state)
+          : renderOracleCreateSkeleton(state),
+      );
+      return;
+    }
     if (!hasLinodeCredentials()) {
       paintView(renderCreateUnavailable(state));
       return;
@@ -563,8 +676,193 @@ async function startAvailabilityCheck(region, tokenId = state.create.tokenId) {
   }
 }
 
+function oracleCreateResourcesKey() {
+  return [
+    state.oracleCreate.accountId,
+    state.oracleCreate.compartmentId,
+    state.oracleCreate.availabilityDomain,
+  ].join("|");
+}
+
+function ensureOracleCreateSelections() {
+  const account = ensureOracleCreateAccount();
+  const options = state.oracleCreate.options;
+  if (!account) {
+    return;
+  }
+  if (!state.oracleCreate.compartmentId) {
+    state.oracleCreate.compartmentId =
+      options.selectedCompartmentId ||
+      account.compartmentId ||
+      account.tenancyId ||
+      "";
+  }
+  if (!state.oracleCreate.availabilityDomain) {
+    state.oracleCreate.availabilityDomain =
+      options.selectedAvailabilityDomain ||
+      options.availabilityDomains?.[0]?.name ||
+      "";
+  }
+
+  const shapes = Array.isArray(options.shapes) ? options.shapes : [];
+  if (!shapes.some((shape) => shape.name === state.oracleCreate.shape)) {
+    const preferred = [
+      "VM.Standard.A1.Flex",
+      "VM.Standard.E4.Flex",
+      "VM.Standard.E2.1.Micro",
+    ];
+    state.oracleCreate.shape =
+      preferred
+        .map((name) => shapes.find((shape) => shape.name === name))
+        .find(Boolean)?.name ||
+      shapes[0]?.name ||
+      "";
+  }
+  const selectedShape = shapes.find(
+    (shape) => shape.name === state.oracleCreate.shape,
+  );
+  if (selectedShape?.isFlexible) {
+    const ocpus = Number(state.oracleCreate.ocpus);
+    const memory = Number(state.oracleCreate.memoryInGBs);
+    if (
+      !Number.isFinite(ocpus) ||
+      ocpus < selectedShape.ocpuMin ||
+      ocpus > selectedShape.ocpuMax
+    ) {
+      state.oracleCreate.ocpus = String(selectedShape.ocpuMin);
+    }
+    if (
+      !Number.isFinite(memory) ||
+      memory < selectedShape.memoryMinInGBs ||
+      memory > selectedShape.memoryMaxInGBs
+    ) {
+      state.oracleCreate.memoryInGBs = String(
+        selectedShape.memoryMinInGBs,
+      );
+    }
+  }
+
+  const images = Array.isArray(options.images) ? options.images : [];
+  if (!images.some((image) => image.id === state.oracleCreate.imageId)) {
+    state.oracleCreate.imageId =
+      images.find(
+        (image) =>
+          /ubuntu/i.test(image.operatingSystem || image.displayName || ""),
+      )?.id ||
+      images[0]?.id ||
+      "";
+  }
+  const vcns = Array.isArray(options.vcns) ? options.vcns : [];
+  if (!vcns.some((vcn) => vcn.id === state.oracleCreate.vcnId)) {
+    state.oracleCreate.vcnId = vcns[0]?.id || "";
+  }
+  const subnets = (Array.isArray(options.subnets) ? options.subnets : [])
+    .filter(
+      (subnet) =>
+        !state.oracleCreate.vcnId ||
+        subnet.vcnId === state.oracleCreate.vcnId,
+    );
+  if (!subnets.some((subnet) => subnet.id === state.oracleCreate.subnetId)) {
+    state.oracleCreate.subnetId =
+      subnets.find((subnet) => subnet.prohibitPublicIpOnVnic !== true)
+        ?.id ||
+      subnets[0]?.id ||
+      "";
+  }
+}
+
+async function loadOracleCreateOptions({ suppressRender = false } = {}) {
+  const account = ensureOracleCreateAccount();
+  if (!account) {
+    state.oracleCreate.options.error = "请先在连接与设置中添加 OCI 账户。";
+    if (!suppressRender && state.view === "create") {
+      renderView();
+    }
+    return;
+  }
+  const requestKey = oracleCreateResourcesKey();
+  if (
+    state.oracleCreate.options.loading &&
+    state.oracleCreate.options.requestKey === requestKey
+  ) {
+    return;
+  }
+  state.oracleCreate.options.loading = true;
+  state.oracleCreate.options.requestKey = requestKey;
+  state.oracleCreate.options.error = "";
+  if (!suppressRender && state.view === "create") {
+    renderView();
+  }
+
+  try {
+    const options = await api.oracleCreateOptions(account.id, {
+      compartmentId: state.oracleCreate.compartmentId,
+      availabilityDomain: state.oracleCreate.availabilityDomain,
+    });
+    if (
+      state.oracleCreate.options.requestKey !== requestKey ||
+      state.oracleCreate.accountId !== account.id
+    ) {
+      return;
+    }
+    state.oracleCreate.options = {
+      ...state.oracleCreate.options,
+      ...options,
+      loading: false,
+      error: "",
+      warnings: options.errors || [],
+    };
+    state.oracleCreate.compartmentId =
+      options.selectedCompartmentId || state.oracleCreate.compartmentId;
+    state.oracleCreate.availabilityDomain =
+      options.selectedAvailabilityDomain ||
+      state.oracleCreate.availabilityDomain;
+    state.oracleCreate.options.resourcesKey = oracleCreateResourcesKey();
+    ensureOracleCreateSelections();
+  } catch (error) {
+    if (state.oracleCreate.options.requestKey !== requestKey) {
+      return;
+    }
+    state.oracleCreate.options.loading = false;
+    state.oracleCreate.options.error = friendlyError(error);
+    state.oracleCreate.options.resourcesKey = "";
+  } finally {
+    if (!suppressRender && state.view === "create") {
+      renderView();
+    }
+  }
+}
+
+function activateOracleCreateView() {
+  ensureCreateProvider();
+  if (!hasOracleCredentials()) {
+    renderView();
+    return;
+  }
+  ensureOracleCreateAccount();
+  ensureOracleCreateSelections();
+  if (
+    state.oracleCreate.options.resourcesKey !== oracleCreateResourcesKey() &&
+    !state.oracleCreate.options.loading
+  ) {
+    void loadOracleCreateOptions();
+    return;
+  }
+  renderView();
+}
+
 function activateCreateView() {
+  ensureCreateProvider();
+  if (state.create.provider === "oracle") {
+    activateOracleCreateView();
+    return;
+  }
   if (!hasLinodeCredentials()) {
+    if (oracleCreateAccounts().length > 0) {
+      state.create.provider = "oracle";
+      activateOracleCreateView();
+      return;
+    }
     renderView();
     return;
   }
@@ -658,6 +956,8 @@ function applySettings(settings) {
     state.authInvalid = false;
   }
   ensureCreateToken();
+  ensureCreateProvider();
+  ensureOracleCreateAccount();
   updateShell();
 }
 
@@ -936,10 +1236,41 @@ function renderModal() {
               <input type="text" id="oracle-user" name="userId" placeholder="ocid1.user.oc1..…" autocomplete="off" spellcheck="false" />
             </label>
             <div class="form-grid-two">
-              <label class="form-field">
+              <div class="form-field">
                 <span class="field-label">区域</span>
-                <input type="text" id="oracle-region" name="region" placeholder="us-ashburn-1" autocomplete="off" spellcheck="false" />
-              </label>
+                <span class="select-wrap">
+                  <span class="select-leading">${icon("globe")}</span>
+                  <select id="oracle-region" name="region" aria-label="选择 OCI 区域" data-custom-menu-min-width="420">
+                    <option value="">选择 OCI 区域…</option>
+                    ${oracleRegionGroups()
+                      .map(
+                        (group) => `
+                          <optgroup label="${escapeHtml(group.label)}">
+                            ${group.regions
+                              .map(
+                                (region) => `
+                                  <option value="${escapeHtml(region.id)}">
+                                    ${escapeHtml(oracleRegionOptionText(region))}
+                                  </option>
+                                `,
+                              )
+                              .join("")}
+                          </optgroup>
+                        `,
+                      )
+                      .join("")}
+                    <optgroup label="其他">
+                      <option value="${CUSTOM_ORACLE_REGION}">其他区域（手动输入代码） — 政府云或未列出的区域</option>
+                    </optgroup>
+                  </select>
+                  ${icon("chevron-down")}
+                </span>
+                <span class="field-hint">一个 OCI 账户只读取一个区域；多区域请分别添加账户。</span>
+                <div class="oracle-region-custom is-hidden" id="oracle-region-custom-field">
+                  <input type="text" id="oracle-region-custom" name="customRegion" placeholder="例如 us-gov-west-1 或 eu-frankfurt-1" autocomplete="off" spellcheck="false" />
+                  <span class="field-hint">请输入 OCI 区域标识符；保存前会由服务端校验格式。</span>
+                </div>
+              </div>
               <label class="form-field">
                 <span class="field-label">密钥指纹</span>
                 <input type="text" id="oracle-fingerprint" name="fingerprint" placeholder="aa:bb:cc:…" autocomplete="off" spellcheck="false" />
@@ -953,7 +1284,7 @@ function renderModal() {
             <label class="form-field">
               <span class="field-label">API 私钥（PEM）</span>
               <textarea id="oracle-private-key" name="privateKey" rows="8" autocomplete="off" spellcheck="false"></textarea>
-              <span class="field-hint">在 OCI「我的概要信息 → API 密钥」中创建。请使用专用 IAM 用户并授予目标 Compartment 的 <code>manage instances</code> 权限。</span>
+              <span class="field-hint">在 OCI「我的概要信息 → API 密钥」中创建。请使用专用 IAM 用户；创建、监控、备份和串口还需要网络、镜像、metrics、volume 与 console 相关权限，完整策略见 README。</span>
             </label>
 
             <button type="submit" class="button button-primary button-block token-submit oracle-submit">
@@ -980,7 +1311,7 @@ function renderModal() {
           <span class="modal-mark modal-mark-danger">${icon("cloud")}</span>
           <span class="eyebrow eyebrow-danger">REMOVE OCI ACCOUNT</span>
           <h2 id="delete-oracle-title">删除本地 OCI 账户</h2>
-          <p>将从本机加密存储中删除 <strong>${escapeHtml(account.label)}</strong>（${escapeHtml(account.region)}）。这不会删除 OCI 上的用户或 API 密钥。</p>
+          <p>将从本机加密存储中删除 <strong>${escapeHtml(account.label)}</strong>（${escapeHtml(oracleRegionLabel(account.region))}）。这不会删除 OCI 上的用户或 API 密钥。</p>
           <form id="delete-oracle-form">
             <div class="form-alert is-hidden" id="delete-oracle-error" role="alert">${icon("alert")}<span></span></div>
             <div class="modal-actions">
@@ -1041,6 +1372,14 @@ function renderModal() {
     elements.modalRoot.innerHTML = renderIpSwapModal(state);
   } else if (state.modal.type === "ip-renew") {
     elements.modalRoot.innerHTML = renderIpRenewModal(state);
+  } else if (state.modal.type === "oracle-backup") {
+    elements.modalRoot.innerHTML = renderOracleBackupModal(state);
+  } else if (state.modal.type === "oracle-backup-delete") {
+    elements.modalRoot.innerHTML = renderOracleBackupDeleteModal(state);
+  } else if (state.modal.type === "oracle-console") {
+    elements.modalRoot.innerHTML = renderOracleConsoleModal(state);
+  } else if (state.modal.type === "oracle-terminate") {
+    elements.modalRoot.innerHTML = renderOracleTerminateModal(state);
   }
 
   enhanceSelects(elements.modalRoot);
@@ -1095,11 +1434,16 @@ async function handleOracleSubmit(event) {
 
   const form = event.currentTarget;
   const field = (id) => form.querySelector(`#${id}`)?.value.trim() || "";
+  const regionChoice = field("oracle-region");
+  const region =
+    regionChoice === CUSTOM_ORACLE_REGION
+      ? field("oracle-region-custom")
+      : regionChoice;
   const payload = {
     label: field("oracle-label"),
     tenancyId: field("oracle-tenancy"),
     userId: field("oracle-user"),
-    region: field("oracle-region"),
+    region,
     fingerprint: field("oracle-fingerprint"),
     compartmentId: field("oracle-compartment"),
     privateKey: form.querySelector("#oracle-private-key")?.value || "",
@@ -1110,7 +1454,10 @@ async function handleOracleSubmit(event) {
   const missing = [
     ["oracle-tenancy", "Tenancy OCID"],
     ["oracle-user", "User OCID"],
-    ["oracle-region", "区域"],
+    [
+      regionChoice === CUSTOM_ORACLE_REGION ? "oracle-region-custom" : "oracle-region",
+      "区域",
+    ],
     ["oracle-fingerprint", "密钥指纹"],
     ["oracle-private-key", "API 私钥"],
   ].find(([id]) => !field(id));
@@ -1118,13 +1465,20 @@ async function handleOracleSubmit(event) {
     errorElement.classList.remove("is-hidden");
     errorElement.querySelector("span").textContent =
       `请填写 ${missing[1]}。`;
-    document.querySelector(`#${missing[0]}`)?.focus();
+    const missingField = document.querySelector(`#${missing[0]}`);
+    const focusTarget =
+      missingField?.tagName === "SELECT"
+        ? missingField
+            .closest(".select-wrap")
+            ?.querySelector(".custom-select-trigger")
+        : missingField;
+    focusTarget?.focus();
     return;
   }
 
   state.modal.busy = true;
   errorElement.classList.add("is-hidden");
-  form.querySelectorAll("input, textarea, button").forEach((element) => {
+  form.querySelectorAll("input, select, textarea, button").forEach((element) => {
     element.disabled = true;
   });
   submit.innerHTML = `${spinner()}<span>正在验证 OCI 签名…</span>`;
@@ -1136,7 +1490,7 @@ async function handleOracleSubmit(event) {
       errorElement.classList.remove("is-hidden");
       errorElement.querySelector("span").textContent = friendlyError(error);
       state.modal.busy = false;
-      form.querySelectorAll("input, textarea, button").forEach((element) => {
+      form.querySelectorAll("input, select, textarea, button").forEach((element) => {
         element.disabled = false;
       });
       submit.innerHTML = `${icon("zap")}<span>验证并保存</span>`;
@@ -1199,6 +1553,284 @@ async function testOracleAccount(accountId) {
     );
   } catch (error) {
     showToast(friendlyError(error), "error");
+  }
+}
+
+function openOracleBackupModal(instance) {
+  if (!instance) {
+    return;
+  }
+  const stamp = new Date()
+    .toISOString()
+    .slice(0, 19)
+    .replace(/[-:T]/g, "");
+  state.modal = {
+    type: "oracle-backup",
+    instance,
+    accountId: instance.accountId || instance.tokenId || "",
+    displayName: `${instance.label || "oci-instance"}-backup-${stamp}`,
+    backupType: "INCREMENTAL",
+    busy: false,
+    error: "",
+  };
+  renderModal();
+  requestAnimationFrame(() => {
+    document.querySelector("#oracle-backup-name")?.focus();
+  });
+}
+
+async function handleOracleBackupSubmit(event) {
+  event.preventDefault();
+  if (state.modal?.type !== "oracle-backup" || state.modal.busy) {
+    return;
+  }
+  const form = event.currentTarget;
+  const displayName = form.querySelector("#oracle-backup-name")?.value.trim() || "";
+  const type =
+    form.querySelector("#oracle-backup-type")?.value === "FULL"
+      ? "FULL"
+      : "INCREMENTAL";
+  const errorElement = document.querySelector("#oracle-backup-error");
+  const submit = form.querySelector('button[type="submit"]');
+  if (!displayName) {
+    errorElement.classList.remove("is-hidden");
+    errorElement.querySelector("span").textContent = "请填写备份名称。";
+    return;
+  }
+
+  const instance = state.modal.instance;
+  state.modal.busy = true;
+  state.modal.error = "";
+  errorElement.classList.add("is-hidden");
+  submit.disabled = true;
+  submit.innerHTML = `${spinner()}<span>正在提交…</span>`;
+  try {
+    const result = await api.createOracleBackup(
+      instance.id,
+      instance.accountId || instance.tokenId,
+      { displayName, type },
+    );
+    let refreshError = "";
+    try {
+      await refreshOracleBackups();
+    } catch (error) {
+      refreshError = friendlyError(error);
+    }
+    state.modal = null;
+    renderModal();
+    renderDrawer();
+    showToast(
+      `${result.warning || "已提交 OCI 启动卷备份创建"}${refreshError ? `；刷新失败：${refreshError}` : ""}`,
+      refreshError ? "info" : "success",
+    );
+  } catch (error) {
+    if (state.modal?.type === "oracle-backup") {
+      state.modal.busy = false;
+      state.modal.error = friendlyError(error);
+      renderModal();
+    }
+  }
+}
+
+function openOracleBackupDeleteModal(backup) {
+  if (!backup) {
+    return;
+  }
+  const instance = currentOracleDetail();
+  if (!instance) {
+    return;
+  }
+  state.modal = {
+    type: "oracle-backup-delete",
+    instance,
+    backup,
+    accountId: instance.accountId || instance.tokenId || "",
+    confirmed: false,
+    busy: false,
+    error: "",
+  };
+  renderModal();
+}
+
+async function handleOracleBackupDeleteSubmit(event) {
+  event.preventDefault();
+  if (
+    state.modal?.type !== "oracle-backup-delete" ||
+    state.modal.busy
+  ) {
+    return;
+  }
+  if (!state.modal.confirmed) {
+    state.modal.error = "请先勾选删除确认。";
+    renderModal();
+    return;
+  }
+  const modal = state.modal;
+  modal.busy = true;
+  modal.error = "";
+  renderModal();
+  try {
+    await api.deleteOracleBackup(
+      modal.instance.id,
+      modal.backup.id,
+      modal.accountId,
+    );
+    let refreshError = "";
+    try {
+      await refreshOracleBackups();
+    } catch (error) {
+      refreshError = friendlyError(error);
+    }
+    state.modal = null;
+    renderModal();
+    renderDrawer();
+    showToast(
+      refreshError
+        ? `备份已删除，但列表刷新失败：${refreshError}`
+        : "OCI 启动卷备份已删除",
+      refreshError ? "info" : "success",
+    );
+  } catch (error) {
+    if (state.modal?.type === "oracle-backup-delete") {
+      state.modal.busy = false;
+      state.modal.error = friendlyError(error);
+      renderModal();
+    }
+  }
+}
+
+function openOracleConsoleModal(instance) {
+  if (!instance) {
+    return;
+  }
+  state.modal = {
+    type: "oracle-console",
+    instance,
+    accountId: instance.accountId || instance.tokenId || "",
+    publicKey: "",
+    busy: false,
+    error: "",
+  };
+  renderModal();
+  requestAnimationFrame(() => {
+    document.querySelector("#oracle-console-public-key")?.focus();
+  });
+}
+
+async function handleOracleConsoleSubmit(event) {
+  event.preventDefault();
+  if (state.modal?.type !== "oracle-console" || state.modal.busy) {
+    return;
+  }
+  const form = event.currentTarget;
+  const publicKey =
+    form.querySelector("#oracle-console-public-key")?.value.trim() || "";
+  const errorElement = document.querySelector("#oracle-console-error");
+  const submit = form.querySelector('button[type="submit"]');
+  if (!/^ssh-rsa\s+\S+(?:\s+.*)?$/i.test(publicKey)) {
+    errorElement.classList.remove("is-hidden");
+    errorElement.querySelector("span").textContent =
+      "OCI 串口连接需要 OpenSSH RSA 公钥（ssh-rsa ...）。";
+    document.querySelector("#oracle-console-public-key")?.focus();
+    return;
+  }
+
+  const instance = state.modal.instance;
+  state.modal.busy = true;
+  state.modal.error = "";
+  errorElement.classList.add("is-hidden");
+  submit.disabled = true;
+  submit.innerHTML = `${spinner()}<span>正在创建…</span>`;
+  try {
+    const result = await api.createOracleConsoleConnection(
+      instance.id,
+      instance.accountId || instance.tokenId,
+      { publicKey },
+    );
+    let refreshError = "";
+    try {
+      await refreshOracleConsole({ clearHistory: false });
+    } catch (error) {
+      refreshError = friendlyError(error);
+    }
+    state.modal = null;
+    renderModal();
+    renderDrawer();
+    showToast(
+      `${result.note || "OCI 串口连接已创建，可复制详情中的 SSH 命令"}${refreshError ? `；列表刷新失败：${refreshError}` : ""}`,
+      refreshError ? "info" : "success",
+    );
+  } catch (error) {
+    if (state.modal?.type === "oracle-console") {
+      state.modal.busy = false;
+      state.modal.error = friendlyError(error);
+      renderModal();
+    }
+  }
+}
+
+function openOracleTerminateModal(instance) {
+  if (!instance) {
+    return;
+  }
+  state.modal = {
+    type: "oracle-terminate",
+    instance,
+    accountId: instance.accountId || instance.tokenId || "",
+    confirmation: "",
+    preserveBootVolume: false,
+    preserveDataVolumes: true,
+    busy: false,
+    error: "",
+  };
+  renderModal();
+  requestAnimationFrame(() => {
+    document.querySelector("#oracle-terminate-confirmation")?.focus();
+  });
+}
+
+async function handleOracleTerminateSubmit(event) {
+  event.preventDefault();
+  if (state.modal?.type !== "oracle-terminate" || state.modal.busy) {
+    return;
+  }
+  const modal = state.modal;
+  const instanceName = modal.instance.label || "";
+  const confirmation = String(modal.confirmation || "").trim();
+  if (confirmation !== instanceName) {
+    modal.error = "输入的名称必须与实例显示名称完全一致。";
+    renderModal();
+    return;
+  }
+  modal.busy = true;
+  modal.error = "";
+  renderModal();
+  try {
+    await api.terminateOracleInstance(
+      modal.instance.id,
+      modal.accountId,
+      {
+        confirmation,
+        preserveBootVolume: modal.preserveBootVolume,
+        preserveDataVolumes: modal.preserveDataVolumes,
+      },
+    );
+    state.modal = null;
+    renderModal();
+    closeDrawer();
+    await loadOverview({ silent: true, suppressRender: true });
+    if (window.location.hash === "#instances") {
+      renderView();
+    } else {
+      window.location.hash = "#instances";
+    }
+    showToast("已向 OCI 提交终止实例请求", "success");
+  } catch (error) {
+    if (state.modal?.type === "oracle-terminate") {
+      state.modal.busy = false;
+      state.modal.error = friendlyError(error);
+      renderModal();
+    }
   }
 }
 
@@ -1760,6 +2392,195 @@ async function loadDetail(
   updateShell();
 }
 
+function currentOracleDetail() {
+  const instance = state.detail.data?.instance;
+  return instance?.provider === "oracle" ? instance : null;
+}
+
+async function loadOracleMetrics(window = "24h") {
+  const instance = currentOracleDetail();
+  if (!instance || state.detail.oracleMetricsLoading) {
+    return;
+  }
+  state.detail.oracleMetricsWindow =
+    ["1h", "6h", "24h", "7d"].includes(window) ? window : "24h";
+  state.detail.oracleMetricsLoading = true;
+  renderDrawer();
+  try {
+    state.detail.data.oracleMetrics = await api.oracleMetrics(
+      instance.id,
+      instance.accountId || instance.tokenId,
+      state.detail.oracleMetricsWindow,
+    );
+  } catch (error) {
+    state.detail.data.oracleMetrics = {
+      available: false,
+      window: state.detail.oracleMetricsWindow,
+      resolution: "5m",
+      metrics: [],
+      errors: [],
+      emptyReason: friendlyError(error),
+    };
+    showToast(friendlyError(error), "error");
+  } finally {
+    state.detail.oracleMetricsLoading = false;
+    renderDrawer();
+  }
+}
+
+async function refreshOracleBackups() {
+  const instance = currentOracleDetail();
+  if (!instance) {
+    return;
+  }
+  state.detail.data.oracleBackups = await api.oracleBackups(
+    instance.id,
+    instance.accountId || instance.tokenId,
+  );
+}
+
+async function refreshOracleConsole({ clearHistory = false } = {}) {
+  const instance = currentOracleDetail();
+  if (!instance) {
+    return;
+  }
+  state.detail.data.oracleConsole = await api.oracleConsole(
+    instance.id,
+    instance.accountId || instance.tokenId,
+  );
+  if (clearHistory) {
+    state.detail.data.oracleConsoleHistory = null;
+  }
+}
+
+async function loadOracleConsoleHistory(historyId) {
+  const instance = currentOracleDetail();
+  if (!instance || !historyId) {
+    return;
+  }
+  state.detail.oracleOpsBusy = `history:${historyId}`;
+  renderDrawer();
+  try {
+    state.detail.data.oracleConsoleHistory =
+      await api.oracleConsoleHistoryData(
+        instance.id,
+        historyId,
+        instance.accountId || instance.tokenId,
+      );
+  } catch (error) {
+    showToast(friendlyError(error), "error");
+  } finally {
+    state.detail.oracleOpsBusy = "";
+    renderDrawer();
+  }
+}
+
+async function createOracleConsoleHistory() {
+  const instance = currentOracleDetail();
+  if (!instance) {
+    return;
+  }
+  state.detail.oracleOpsBusy = "history:create";
+  renderDrawer();
+  try {
+    const result = await api.createOracleConsoleHistory(
+      instance.id,
+      instance.accountId || instance.tokenId,
+      {
+        displayName: `console-${instance.label || "instance"} ${new Date()
+          .toISOString()
+          .slice(0, 19)}`,
+      },
+    );
+    let refreshError = "";
+    try {
+      await refreshOracleConsole({ clearHistory: false });
+    } catch (error) {
+      refreshError = friendlyError(error);
+    }
+    showToast(
+      `${result.note || "已提交控制台历史采集，稍后即可读取启动日志"}${refreshError ? `；列表刷新失败：${refreshError}` : ""}`,
+      refreshError ? "info" : "success",
+    );
+  } catch (error) {
+    showToast(friendlyError(error), "error");
+  } finally {
+    state.detail.oracleOpsBusy = "";
+    renderDrawer();
+  }
+}
+
+async function deleteOracleConsoleHistory(historyId) {
+  const instance = currentOracleDetail();
+  if (!instance || !historyId) {
+    return;
+  }
+  state.detail.oracleOpsBusy = `history:${historyId}`;
+  renderDrawer();
+  try {
+    await api.deleteOracleConsoleHistory(
+      instance.id,
+      historyId,
+      instance.accountId || instance.tokenId,
+    );
+    if (
+      state.detail.data.oracleConsoleHistory?.historyId === historyId
+    ) {
+      state.detail.data.oracleConsoleHistory = null;
+    }
+    let refreshError = "";
+    try {
+      await refreshOracleConsole();
+    } catch (error) {
+      refreshError = friendlyError(error);
+    }
+    showToast(
+      refreshError
+        ? `已删除 OCI 控制台历史记录，但列表刷新失败：${refreshError}`
+        : "已删除 OCI 控制台历史记录",
+      refreshError ? "info" : "success",
+    );
+  } catch (error) {
+    showToast(friendlyError(error), "error");
+  } finally {
+    state.detail.oracleOpsBusy = "";
+    renderDrawer();
+  }
+}
+
+async function deleteOracleConsoleConnection(connectionId) {
+  const instance = currentOracleDetail();
+  if (!instance || !connectionId) {
+    return;
+  }
+  state.detail.oracleOpsBusy = `connection:${connectionId}`;
+  renderDrawer();
+  try {
+    await api.deleteOracleConsoleConnection(
+      instance.id,
+      connectionId,
+      instance.accountId || instance.tokenId,
+    );
+    let refreshError = "";
+    try {
+      await refreshOracleConsole();
+    } catch (error) {
+      refreshError = friendlyError(error);
+    }
+    showToast(
+      refreshError
+        ? `已删除 OCI 串口连接，但列表刷新失败：${refreshError}`
+        : "已删除 OCI 串口连接",
+      refreshError ? "info" : "success",
+    );
+  } catch (error) {
+    showToast(friendlyError(error), "error");
+  } finally {
+    state.detail.oracleOpsBusy = "";
+    renderDrawer();
+  }
+}
+
 function mergeInstance(instance) {
   if (!instance || !state.overview?.instances) {
     return;
@@ -1789,6 +2610,9 @@ function openDetail(instanceId, tokenId, provider = "linode") {
     error: null,
     data: null,
     returnFocus: document.activeElement,
+    oracleMetricsWindow: "24h",
+    oracleMetricsLoading: false,
+    oracleOpsBusy: "",
   };
   renderDrawer();
   syncBodyLock();
@@ -1809,6 +2633,9 @@ function closeDrawer() {
     error: null,
     data: null,
     returnFocus: null,
+    oracleMetricsWindow: "24h",
+    oracleMetricsLoading: false,
+    oracleOpsBusy: "",
   };
   renderDrawer();
   syncBodyLock();
@@ -1952,6 +2779,143 @@ function validateCreateForm() {
     return "最多添加 10 个标签。";
   }
   return "";
+}
+
+function validateOracleCreateForm() {
+  const form = state.oracleCreate;
+  const options = form.options;
+  if (!form.accountId) {
+    return "请选择用于创建实例的 OCI 账户。";
+  }
+  if (!form.label.trim()) {
+    return "请填写 OCI 实例名称。";
+  }
+  if (!form.compartmentId) {
+    return "请选择 Compartment。";
+  }
+  if (!form.availabilityDomain) {
+    return "请选择可用域。";
+  }
+  if (!form.shape) {
+    return "请选择 Shape。";
+  }
+  if (!form.imageId) {
+    return "请选择系统镜像。";
+  }
+  if (!form.vcnId) {
+    return "请选择 VCN。";
+  }
+  if (!form.subnetId) {
+    return "请选择子网。";
+  }
+  const sshKeys = parseSshKeys(form.sshKeys);
+  if (sshKeys.length === 0) {
+    return "至少填写一个 SSH 公钥，否则新实例将无法登录。";
+  }
+  const selectedShape = (options.shapes || []).find(
+    (shape) => shape.name === form.shape,
+  );
+  if (selectedShape?.isFlexible) {
+    const ocpus = Number(form.ocpus);
+    const memory = Number(form.memoryInGBs);
+    if (
+      !Number.isFinite(ocpus) ||
+      ocpus < selectedShape.ocpuMin ||
+      ocpus > selectedShape.ocpuMax
+    ) {
+      return `OCPU 必须在 ${selectedShape.ocpuMin}–${selectedShape.ocpuMax} 之间。`;
+    }
+    if (
+      !Number.isFinite(memory) ||
+      memory < selectedShape.memoryMinInGBs ||
+      memory > selectedShape.memoryMaxInGBs
+    ) {
+      return `内存必须在 ${selectedShape.memoryMinInGBs}–${selectedShape.memoryMaxInGBs} GB 之间。`;
+    }
+  }
+  return "";
+}
+
+function setOracleCreateBusy(busy) {
+  state.oracleCreating = busy;
+  const form = document.querySelector("#oracle-create-form");
+  form
+    ?.querySelectorAll("input, select, textarea, button")
+    .forEach((element) => {
+      element.disabled = busy;
+    });
+  document
+    .querySelectorAll(".create-summary .create-submit")
+    .forEach((button) => {
+      button.disabled = busy;
+    });
+}
+
+async function handleOracleCreateSubmit(event) {
+  event.preventDefault();
+  if (state.oracleCreating) {
+    return;
+  }
+  const validationError = validateOracleCreateForm();
+  if (validationError) {
+    state.oracleCreateError = validationError;
+    renderView();
+    document
+      .querySelector(".create-summary")
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    return;
+  }
+
+  const form = state.oracleCreate;
+  const selectedShape = (form.options.shapes || []).find(
+    (shape) => shape.name === form.shape,
+  );
+  const payload = {
+    accountId: form.accountId,
+    compartmentId: form.compartmentId,
+    availabilityDomain: form.availabilityDomain,
+    displayName: form.label.trim(),
+    shape: form.shape,
+    imageId: form.imageId,
+    subnetId: form.subnetId,
+    assignPublicIp: form.assignPublicIp,
+    sshAuthorizedKeys: parseSshKeys(form.sshKeys),
+  };
+  if (selectedShape?.isFlexible) {
+    payload.ocpus = Number(form.ocpus);
+    payload.memoryInGBs = Number(form.memoryInGBs);
+  }
+  if (form.userData.trim()) {
+    payload.userData = form.userData;
+  }
+
+  state.oracleCreateError = "";
+  setOracleCreateBusy(true);
+  renderView();
+  try {
+    const result = await api.createOracleInstance(payload);
+    const created = result.instance;
+    const keptAccountId = form.accountId;
+    state.oracleCreating = false;
+    state.oracleCreate = newOracleCreateState();
+    state.oracleCreate.accountId = keptAccountId;
+    state.oracleCreateError = "";
+    showToast(
+      `OCI 实例 ${created?.label || payload.displayName} 已提交创建`,
+      "success",
+    );
+    await loadOverview({ silent: true, suppressRender: true });
+    if (window.location.hash === "#instances") {
+      renderView();
+    } else {
+      window.location.hash = "#instances";
+    }
+  } catch (error) {
+    state.oracleCreating = false;
+    state.oracleCreateError = friendlyError(error);
+    setOracleCreateBusy(false);
+    renderView();
+  }
 }
 
 function setCreateFormBusy(busy) {
@@ -2464,6 +3428,53 @@ function handleClick(event) {
         renderModal();
       }
       break;
+    case "set-create-provider":
+      state.create.provider =
+        target.dataset.provider === "oracle" ? "oracle" : "linode";
+      state.createError = "";
+      state.oracleCreateError = "";
+      activateCreateView();
+      break;
+    case "retry-oracle-create-options":
+      void loadOracleCreateOptions();
+      break;
+    case "oci-metric-window":
+      void loadOracleMetrics(target.dataset.window || "24h");
+      break;
+    case "oci-backup-create":
+      openOracleBackupModal(currentOracleDetail());
+      break;
+    case "oci-backup-delete": {
+      const backup = state.detail.data?.oracleBackups?.backups?.find(
+        (entry) => entry.id === target.dataset.backupId,
+      );
+      openOracleBackupDeleteModal(backup);
+      break;
+    }
+    case "oci-console-connect":
+      openOracleConsoleModal(currentOracleDetail());
+      break;
+    case "oci-console-capture":
+      void createOracleConsoleHistory();
+      break;
+    case "oci-console-history":
+      void loadOracleConsoleHistory(target.dataset.historyId);
+      break;
+    case "oci-console-history-delete":
+      void deleteOracleConsoleHistory(target.dataset.historyId);
+      break;
+    case "oci-console-disconnect":
+      void deleteOracleConsoleConnection(target.dataset.connectionId);
+      break;
+    case "oci-console-history-close":
+      if (state.detail.data) {
+        state.detail.data.oracleConsoleHistory = null;
+      }
+      renderDrawer();
+      break;
+    case "oci-terminate":
+      openOracleTerminateModal(currentOracleDetail());
+      break;
     case "retry-catalog":
       void loadCatalog();
       break;
@@ -2506,12 +3517,164 @@ function handleInput(event) {
   }
   if (target.id === "create-user-data") {
     state.create.userData = target.value;
+    return;
+  }
+  if (target.id === "oracle-create-label") {
+    state.oracleCreate.label = target.value;
+    state.oracleCreateError = "";
+    return;
+  }
+  if (target.id === "oracle-create-ocpus") {
+    state.oracleCreate.ocpus = target.value;
+    state.oracleCreateError = "";
+    return;
+  }
+  if (target.id === "oracle-create-memory") {
+    state.oracleCreate.memoryInGBs = target.value;
+    state.oracleCreateError = "";
+    return;
+  }
+  if (target.id === "oracle-create-ssh-keys") {
+    state.oracleCreate.sshKeys = target.value;
+    state.oracleCreateError = "";
+    return;
+  }
+  if (target.id === "oracle-create-user-data") {
+    state.oracleCreate.userData = target.value;
+    return;
+  }
+  if (
+    target.id === "oracle-terminate-confirmation" &&
+    state.modal?.type === "oracle-terminate"
+  ) {
+    state.modal.confirmation = target.value;
+    state.modal.error = "";
+    const expected = state.modal.instance?.label || "";
+    const submit = document.querySelector(
+      '#oracle-terminate-form button[type="submit"]',
+    );
+    if (submit) {
+      submit.disabled =
+        Boolean(state.modal.busy) ||
+        String(target.value || "").trim() !== expected;
+    }
   }
 }
 
 function handleChange(event) {
   const target = event.target;
 
+  if (target.id === "oracle-region") {
+    const customField = document.querySelector("#oracle-region-custom-field");
+    const useCustom = target.value === CUSTOM_ORACLE_REGION;
+    customField?.classList.toggle("is-hidden", !useCustom);
+    if (useCustom) {
+      requestAnimationFrame(() => {
+        document.querySelector("#oracle-region-custom")?.focus();
+      });
+    }
+    return;
+  }
+  if (target.id === "oracle-create-account") {
+    state.oracleCreate.accountId = target.value;
+    state.oracleCreate.compartmentId = "";
+    state.oracleCreate.availabilityDomain = "";
+    state.oracleCreate.shape = "";
+    state.oracleCreate.imageId = "";
+    state.oracleCreate.vcnId = "";
+    state.oracleCreate.subnetId = "";
+    state.oracleCreateError = "";
+    state.oracleCreate.options = {
+      ...state.oracleCreate.options,
+      loading: false,
+      error: "",
+      resourcesKey: "",
+      compartments: [],
+      availabilityDomains: [],
+      shapes: [],
+      images: [],
+      vcns: [],
+      subnets: [],
+      empty: [],
+      warnings: [],
+    };
+    renderView();
+    void loadOracleCreateOptions();
+    return;
+  }
+  if (target.id === "oracle-create-compartment") {
+    state.oracleCreate.compartmentId = target.value;
+    state.oracleCreate.shape = "";
+    state.oracleCreate.imageId = "";
+    state.oracleCreate.vcnId = "";
+    state.oracleCreate.subnetId = "";
+    state.oracleCreateError = "";
+    state.oracleCreate.options.resourcesKey = "";
+    renderView();
+    void loadOracleCreateOptions();
+    return;
+  }
+  if (target.id === "oracle-create-ad") {
+    state.oracleCreate.availabilityDomain = target.value;
+    state.oracleCreate.shape = "";
+    state.oracleCreateError = "";
+    state.oracleCreate.options.resourcesKey = "";
+    renderView();
+    void loadOracleCreateOptions();
+    return;
+  }
+  if (target.id === "oracle-create-shape") {
+    state.oracleCreate.shape = target.value;
+    state.oracleCreateError = "";
+    ensureOracleCreateSelections();
+    renderView();
+    return;
+  }
+  if (target.id === "oracle-create-image") {
+    state.oracleCreate.imageId = target.value;
+    state.oracleCreateError = "";
+    renderView();
+    return;
+  }
+  if (target.id === "oracle-create-vcn") {
+    state.oracleCreate.vcnId = target.value;
+    state.oracleCreate.subnetId = "";
+    ensureOracleCreateSelections();
+    renderView();
+    return;
+  }
+  if (target.id === "oracle-create-subnet") {
+    state.oracleCreate.subnetId = target.value;
+    state.oracleCreateError = "";
+    renderView();
+    return;
+  }
+  if (target.id === "oracle-create-public-ip") {
+    state.oracleCreate.assignPublicIp = target.checked;
+    return;
+  }
+  if (target.id === "oracle-backup-delete-confirm") {
+    if (state.modal?.type === "oracle-backup-delete") {
+      state.modal.confirmed = target.checked;
+      state.modal.error = "";
+      renderModal();
+    }
+    return;
+  }
+  if (target.id === "oracle-terminate-preserve-boot") {
+    if (state.modal?.type === "oracle-terminate") {
+      state.modal.preserveBootVolume = target.checked;
+      state.modal.error = "";
+    }
+    return;
+  }
+  if (target.id === "oracle-terminate-preserve-data") {
+    if (state.modal?.type === "oracle-terminate") {
+      state.modal.preserveDataVolumes = target.checked;
+      state.modal.error = "";
+    }
+    return;
+  }
   if (target.id === "ip-swap-target") {
     void loadIpSwapTarget(target.value);
     return;
@@ -2640,6 +3803,16 @@ function handleSubmit(event) {
     void handleIpRenewSubmit(event);
   } else if (event.target.id === "create-form") {
     void handleCreateSubmit(event);
+  } else if (event.target.id === "oracle-create-form") {
+    void handleOracleCreateSubmit(event);
+  } else if (event.target.id === "oracle-backup-form") {
+    void handleOracleBackupSubmit(event);
+  } else if (event.target.id === "oracle-backup-delete-form") {
+    void handleOracleBackupDeleteSubmit(event);
+  } else if (event.target.id === "oracle-console-form") {
+    void handleOracleConsoleSubmit(event);
+  } else if (event.target.id === "oracle-terminate-form") {
+    void handleOracleTerminateSubmit(event);
   }
 }
 

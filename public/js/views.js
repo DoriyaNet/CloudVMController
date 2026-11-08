@@ -1,5 +1,6 @@
 import { extractPoints, latestValue, renderLineChart } from "./charts.js";
 import { icon } from "./icons.js";
+import { getOracleRegion } from "./oracle-regions.js";
 import {
   clamp,
   countryFlag,
@@ -69,7 +70,10 @@ function greeting() {
 }
 
 function getRegion(state, regionId) {
-  return state.catalog?.regions?.find((region) => region.id === regionId) || null;
+  return (
+    state.catalog?.regions?.find((region) => region.id === regionId) ||
+    getOracleRegion(regionId)
+  );
 }
 
 function getPlan(state, typeId) {
@@ -254,9 +258,9 @@ export function renderOverview(state) {
             <span>同步状态</span>
           </button>
           ${
-            state.settings?.tokenConfigured
-              ? `<a class="button button-primary" href="#create">${icon("plus")}<span>部署 Linode</span></a>`
-              : `<a class="button button-primary" href="#settings">${icon("plus")}<span>连接 Linode 以部署</span></a>`
+            state.settings?.tokenConfigured || state.settings?.oracleConfigured
+              ? `<a class="button button-primary" href="#create">${icon("plus")}<span>部署实例</span></a>`
+              : `<a class="button button-primary" href="#settings">${icon("plus")}<span>连接云账户</span></a>`
           }
         </div>
       </header>
@@ -349,9 +353,11 @@ export function renderOverview(state) {
                       iconName: "server",
                       title: "还没有计算实例",
                       description: "选择一个区域和配置，几分钟内即可完成部署。",
-                      action: state.settings?.tokenConfigured
+                      action:
+                        state.settings?.tokenConfigured ||
+                        state.settings?.oracleConfigured
                         ? `<a class="button button-primary button-sm" href="#create">${icon("plus")}创建实例</a>`
-                        : `<a class="button button-secondary button-sm" href="#settings">${icon("settings")}连接 Linode 以部署</a>`,
+                        : `<a class="button button-secondary button-sm" href="#settings">${icon("settings")}连接云账户</a>`,
                     })
               }
             </div>
@@ -624,16 +630,16 @@ export function renderInstances(state) {
       ${pageHeader({
         eyebrow: "COMPUTE",
         title: "计算实例",
-        description: "统一管理 Linode 与 Oracle Cloud 实例，执行开关机、重启和状态检查。",
+        description: "统一管理 Linode 与 Oracle Cloud 实例，执行创建、开关机、监控和生命周期操作。",
         actions: `
           <button type="button" class="button button-secondary" data-action="refresh-overview">
             ${state.refreshing ? spinner() : icon("refresh")}
             <span>刷新</span>
           </button>
           ${
-            state.settings?.tokenConfigured
-              ? `<a class="button button-primary" href="#create">${icon("plus")}<span>部署 Linode</span></a>`
-              : ""
+            state.settings?.tokenConfigured || state.settings?.oracleConfigured
+              ? `<a class="button button-primary" href="#create">${icon("plus")}<span>部署实例</span></a>`
+              : `<a class="button button-secondary" href="#settings">${icon("settings")}<span>连接云账户</span></a>`
           }
         `,
       })}
@@ -746,9 +752,10 @@ export function renderInstances(state) {
                   : "尝试更换关键词、状态或区域筛选条件。",
               action:
                 instances.length === 0
-                  ? state.settings?.tokenConfigured
+                  ? state.settings?.tokenConfigured ||
+                    state.settings?.oracleConfigured
                     ? `<a class="button button-primary button-sm" href="#create">${icon("plus")}创建实例</a>`
-                    : `<a class="button button-secondary button-sm" href="#settings">${icon("settings")}连接 Linode 以部署</a>`
+                    : `<a class="button button-secondary button-sm" href="#settings">${icon("settings")}连接云账户</a>`
                   : `<button type="button" class="button button-secondary button-sm" data-action="clear-filters">清除筛选</button>`,
             })
       }
@@ -922,23 +929,59 @@ export function renderCreateSummary(state) {
   `;
 }
 
+export function renderCreateProviderSwitch(state) {
+  const linodeAvailable =
+    Boolean(state.settings?.tokenConfigured) ||
+    Boolean(state.session?.tokenConfigured);
+  const oracleAvailable =
+    Boolean(state.settings?.oracleConfigured) ||
+    (Array.isArray(state.settings?.oracleAccounts) &&
+      state.settings.oracleAccounts.length > 0);
+  if (!linodeAvailable || !oracleAvailable) {
+    return "";
+  }
+  const provider = state.create.provider === "oracle" ? "oracle" : "linode";
+  return `
+    <span class="create-provider-switch" role="group" aria-label="选择部署提供商">
+      <button
+        type="button"
+        class="create-provider-option${provider === "linode" ? " is-active" : ""}"
+        data-action="set-create-provider"
+        data-provider="linode"
+      >
+        <span class="provider-chip provider-linode">LINODE</span>
+        <span>Akamai</span>
+      </button>
+      <button
+        type="button"
+        class="create-provider-option${provider === "oracle" ? " is-active" : ""}"
+        data-action="set-create-provider"
+        data-provider="oracle"
+      >
+        <span class="provider-chip provider-oracle">OCI</span>
+        <span>Oracle</span>
+      </button>
+    </span>
+  `;
+}
+
 export function renderCreateUnavailable(state) {
   return `
     <section class="page page-create">
       ${pageHeader({
         eyebrow: "COMPUTE",
         title: "部署实例",
-        description: "当前控制台支持 Linode 实例部署，以及 Oracle Cloud 实例的日常运维。",
+        description: "连接 Linode 或 Oracle Cloud 账户后，可在这里创建对应提供商的实例。",
       })}
       <div class="panel panel-empty-onboarding">
         <span class="connect-mark">${icon("cloud")}</span>
         <div>
-          <span class="panel-kicker">ORACLE CLOUD</span>
-          <h2>Oracle 实例创建尚未开放</h2>
-          <p>Oracle Cloud 已连接，可查看实例、网络和运行状态，并执行启动、关闭、重启。新实例请在 OCI 控制台或 Terraform 中创建，创建后会自动出现在这里。</p>
+          <span class="panel-kicker">COMPUTE PROVISIONING</span>
+          <h2>还没有可部署的云账户</h2>
+          <p>添加 Linode API 令牌或 OCI API 密钥后，即可在控制台创建实例。OCI 创建需要可访问的 Shape、镜像、VCN 与子网。</p>
           <div class="page-header-actions">
-            <a class="button button-primary" href="https://cloud.oracle.com/compute/instances" target="_blank" rel="noreferrer">${icon("external-link")}打开 OCI 控制台</a>
-            <a class="button button-secondary" href="#settings">${icon("settings")}连接 Linode 以启用部署</a>
+            <button type="button" class="button button-primary" data-action="open-token">${icon("key")}添加 Linode 令牌</button>
+            <button type="button" class="button button-secondary" data-action="open-oracle">${icon("cloud")}添加 OCI 账户</button>
           </div>
         </div>
       </div>
@@ -986,6 +1029,7 @@ export function renderCreate(state) {
   const credentials = createCredentials(state);
 
   const actions = `
+    ${renderCreateProviderSwitch(state)}
     <a class="text-link" href="https://techdocs.akamai.com/linode-api/reference/post-linode-instance" target="_blank" rel="noreferrer">
       创建 API 文档 ${icon("external-link")}
     </a>
@@ -1273,6 +1317,432 @@ export function renderCreate(state) {
   `;
 }
 
+function oracleCreateSelectEmpty(label) {
+  return `<option value="">${escapeHtml(label)}</option>`;
+}
+
+function oracleImageOptionLabel(image) {
+  const base = image?.displayName || image?.operatingSystem || image?.id || "";
+  const version = String(image?.operatingSystemVersion || "").trim();
+  return version && !String(base).includes(version)
+    ? `${base} ${version}`
+    : base;
+}
+
+export function renderOracleCreateSkeleton(state) {
+  return `
+    <section class="page page-create skeleton-page">
+      ${pageHeader({
+        eyebrow: "ORACLE CLOUD",
+        title: "创建 OCI 实例",
+        description: "正在读取可用域、计算 Shape 与网络资源。",
+        actions: renderCreateProviderSwitch(state),
+      })}
+      <div class="create-layout">
+        <div>
+          <div class="skeleton skeleton-card skeleton-card-tall"></div>
+          <div class="skeleton skeleton-card skeleton-card-tall"></div>
+        </div>
+        <div class="skeleton skeleton-summary"></div>
+      </div>
+    </section>
+  `;
+}
+
+export function renderOracleCreate(state) {
+  const options = state.oracleCreate.options || {};
+  const account = options.account ||
+    oracleCreateAccountsFromState(state).find(
+      (entry) => entry.id === state.oracleCreate.accountId,
+    ) ||
+    null;
+  const region = getRegion(state, account?.region || "");
+  const compartments = Array.isArray(options.compartments)
+    ? options.compartments
+    : [];
+  const domains = Array.isArray(options.availabilityDomains)
+    ? options.availabilityDomains
+    : [];
+  const shapes = Array.isArray(options.shapes) ? options.shapes : [];
+  const images = Array.isArray(options.images) ? options.images : [];
+  const vcns = Array.isArray(options.vcns) ? options.vcns : [];
+  const allSubnets = Array.isArray(options.subnets) ? options.subnets : [];
+  const subnets = allSubnets.filter(
+    (subnet) =>
+      !state.oracleCreate.vcnId ||
+      subnet.vcnId === state.oracleCreate.vcnId,
+  );
+  const selectedShape = shapes.find(
+    (shape) => shape.name === state.oracleCreate.shape,
+  );
+  const selectedImage = images.find(
+    (image) => image.id === state.oracleCreate.imageId,
+  );
+  const selectedVcn = vcns.find(
+    (vcn) => vcn.id === state.oracleCreate.vcnId,
+  );
+  const selectedSubnet = subnets.find(
+    (subnet) => subnet.id === state.oracleCreate.subnetId,
+  );
+  const selectedCompartment = compartments.find(
+    (compartment) => compartment.id === state.oracleCreate.compartmentId,
+  );
+  const busy = Boolean(state.oracleCreating);
+  const resourcesLoading = Boolean(options.loading);
+  const disabled = busy || resourcesLoading;
+  const errors = Array.isArray(options.errors) ? options.errors : [];
+  const empty = Array.isArray(options.empty) ? options.empty : [];
+  const accounts = oracleCreateAccountsFromState(state);
+  const shapeDescription =
+    selectedShape?.isFlexible
+      ? `${state.oracleCreate.ocpus || selectedShape.ocpuMin} OCPU · ${state.oracleCreate.memoryInGBs || selectedShape.memoryMinInGBs} GB 内存（可调）`
+      : selectedShape
+        ? `${formatNumber(selectedShape.ocpus ?? selectedShape.ocpuMin)} OCPU · ${formatNumber(selectedShape.memoryInGBs ?? selectedShape.memoryMinInGBs)} GB 内存`
+        : "等待选择";
+
+  return `
+    <section class="page page-create">
+      ${pageHeader({
+        eyebrow: "ORACLE CLOUD",
+        title: "创建 OCI 实例",
+        description: "从现有 OCI 账户、可用域和子网创建 Compute 实例。新实例按 OCI 实际用量计费。",
+        actions: `
+          ${renderCreateProviderSwitch(state)}
+          <a class="text-link" href="https://docs.oracle.com/iaas/api/#/en/iaas/20160918/Instance/LaunchInstance" target="_blank" rel="noreferrer">
+            创建 API 文档 ${icon("external-link")}
+          </a>
+        `,
+      })}
+
+      ${
+        options.error
+          ? `<div class="form-alert page-form-alert" role="alert">
+              ${icon("alert")}
+              <span>${escapeHtml(options.error)}</span>
+              <button type="button" class="text-button" data-action="retry-oracle-create-options">重试</button>
+            </div>`
+          : ""
+      }
+
+      <div class="create-layout">
+        <form id="oracle-create-form" class="create-form" novalidate>
+          <section class="form-card">
+            <div class="form-card-heading">
+              <span class="form-step">01</span>
+              <div><h2>账户、位置与规格</h2><p>OCI 资源按区域和 Compartment 隔离；Shape 与可用域会共同影响可创建规格。</p></div>
+            </div>
+
+            <div class="form-grid-two">
+              <label class="form-field">
+                <span class="field-label">OCI 账户</span>
+                <span class="select-wrap">
+                  <span class="select-leading">${icon("cloud")}</span>
+                  <select id="oracle-create-account" ${disabled ? "disabled" : ""}>
+                    ${
+                      accounts.length > 0
+                        ? accounts
+                            .map(
+                              (entry) => `<option value="${escapeHtml(entry.id)}"${entry.id === state.oracleCreate.accountId ? " selected" : ""}>${escapeHtml(entry.label)} · ${escapeHtml(getRegion(state, entry.region)?.label || entry.region)}</option>`,
+                            )
+                            .join("")
+                        : oracleCreateSelectEmpty("没有 OCI 账户")
+                    }
+                  </select>
+                  ${icon("chevron-down")}
+                </span>
+              </label>
+              <label class="form-field">
+                <span class="field-label">实例名称</span>
+                <input
+                  type="text"
+                  id="oracle-create-label"
+                  value="${escapeHtml(state.oracleCreate.label)}"
+                  maxlength="255"
+                  autocomplete="off"
+                  ${disabled ? "disabled" : ""}
+                />
+                <span class="field-hint">最多 255 个字符，会作为 OCI Display Name。</span>
+              </label>
+            </div>
+
+            <div class="form-grid-two">
+              <label class="form-field">
+                <span class="field-label">Compartment</span>
+                <span class="select-wrap">
+                  <span class="select-leading">${icon("grid")}</span>
+                  <select id="oracle-create-compartment" ${disabled ? "disabled" : ""}>
+                    ${
+                      compartments.length > 0
+                        ? compartments
+                            .map(
+                              (entry) => `<option value="${escapeHtml(entry.id)}"${entry.id === state.oracleCreate.compartmentId ? " selected" : ""}>${escapeHtml(entry.name)}</option>`,
+                            )
+                            .join("")
+                        : oracleCreateSelectEmpty("没有可访问的 Compartment")
+                    }
+                  </select>
+                  ${icon("chevron-down")}
+                </span>
+                <span class="field-hint">只列出当前 OCI 凭据可读取的 Compartment。</span>
+              </label>
+              <label class="form-field">
+                <span class="field-label">可用域</span>
+                <span class="select-wrap">
+                  <span class="select-leading">${icon("globe")}</span>
+                  <select id="oracle-create-ad" ${disabled ? "disabled" : ""}>
+                    ${
+                      domains.length > 0
+                        ? domains
+                            .map(
+                              (entry) => `<option value="${escapeHtml(entry.name)}"${entry.name === state.oracleCreate.availabilityDomain ? " selected" : ""}>${escapeHtml(entry.name)}</option>`,
+                            )
+                            .join("")
+                        : oracleCreateSelectEmpty("没有可用域")
+                    }
+                  </select>
+                  ${icon("chevron-down")}
+                </span>
+              </label>
+            </div>
+
+            <label class="form-field">
+              <span class="field-label">Shape</span>
+              <span class="select-wrap">
+                <span class="select-leading">${icon("cpu")}</span>
+                <select id="oracle-create-shape" ${disabled ? "disabled" : ""}>
+                  ${
+                    shapes.length > 0
+                      ? shapes
+                          .map(
+                            (shape) => `<option value="${escapeHtml(shape.name)}"${shape.name === state.oracleCreate.shape ? " selected" : ""}>${escapeHtml(shape.name)}${shape.isFlexible ? ` · ${formatNumber(shape.ocpuMin)}–${formatNumber(shape.ocpuMax)} OCPU · ${formatNumber(shape.memoryMinInGBs)}–${formatNumber(shape.memoryMaxInGBs)} GB` : " · 固定规格"}</option>`,
+                          )
+                          .join("")
+                      : oracleCreateSelectEmpty("没有可用 Shape")
+                  }
+                </select>
+                ${icon("chevron-down")}
+              </span>
+            </label>
+
+            ${
+              selectedShape?.isFlexible
+                ? `<div class="form-grid-two oci-flex-fields">
+                    <label class="form-field">
+                      <span class="field-label">OCPU</span>
+                      <input type="number" id="oracle-create-ocpus" min="${selectedShape.ocpuMin}" max="${selectedShape.ocpuMax}" step="0.1" value="${escapeHtml(state.oracleCreate.ocpus)}" ${disabled ? "disabled" : ""} />
+                      <span class="field-hint">范围 ${formatNumber(selectedShape.ocpuMin)}–${formatNumber(selectedShape.ocpuMax)} OCPU。</span>
+                    </label>
+                    <label class="form-field">
+                      <span class="field-label">内存（GB）</span>
+                      <input type="number" id="oracle-create-memory" min="${selectedShape.memoryMinInGBs}" max="${selectedShape.memoryMaxInGBs}" step="1" value="${escapeHtml(state.oracleCreate.memoryInGBs)}" ${disabled ? "disabled" : ""} />
+                      <span class="field-hint">范围 ${formatNumber(selectedShape.memoryMinInGBs)}–${formatNumber(selectedShape.memoryMaxInGBs)} GB。</span>
+                    </label>
+                  </div>`
+                : ""
+            }
+
+            <label class="form-field">
+              <span class="field-label">系统镜像</span>
+              <span class="select-wrap">
+                <span class="select-leading">${icon("terminal")}</span>
+                <select id="oracle-create-image" ${disabled ? "disabled" : ""}>
+                  ${
+                    images.length > 0
+                      ? images
+                          .map(
+                            (image) => `<option value="${escapeHtml(image.id)}"${image.id === state.oracleCreate.imageId ? " selected" : ""}>${escapeHtml(oracleImageOptionLabel(image))}</option>`,
+                          )
+                          .join("")
+                      : oracleCreateSelectEmpty("没有可用镜像")
+                  }
+                </select>
+                ${icon("chevron-down")}
+              </span>
+              <span class="field-hint">平台镜像与当前 Compartment 可访问的自定义镜像。</span>
+            </label>
+          </section>
+
+          <section class="form-card">
+            <div class="form-card-heading">
+              <span class="form-step">02</span>
+              <div><h2>网络与访问</h2><p>OCI 必须选择现有 VCN 与子网；本控制台不会自动创建网络。</p></div>
+            </div>
+
+            <div class="form-grid-two">
+              <label class="form-field">
+                <span class="field-label">VCN</span>
+                <span class="select-wrap">
+                  <span class="select-leading">${icon("network")}</span>
+                  <select id="oracle-create-vcn" ${disabled ? "disabled" : ""}>
+                    ${
+                      vcns.length > 0
+                        ? vcns
+                            .map(
+                              (vcn) => `<option value="${escapeHtml(vcn.id)}"${vcn.id === state.oracleCreate.vcnId ? " selected" : ""}>${escapeHtml(vcn.displayName || vcn.id)} · ${escapeHtml(vcn.cidrBlock || "")}</option>`,
+                            )
+                            .join("")
+                        : oracleCreateSelectEmpty("当前 Compartment 没有 VCN")
+                    }
+                  </select>
+                  ${icon("chevron-down")}
+                </span>
+              </label>
+              <label class="form-field">
+                <span class="field-label">子网</span>
+                <span class="select-wrap">
+                  <span class="select-leading">${icon("network")}</span>
+                  <select id="oracle-create-subnet" ${disabled ? "disabled" : ""}>
+                    ${
+                      subnets.length > 0
+                        ? subnets
+                            .map(
+                              (subnet) => `<option value="${escapeHtml(subnet.id)}"${subnet.id === state.oracleCreate.subnetId ? " selected" : ""}>${escapeHtml(subnet.displayName || subnet.id)} · ${escapeHtml(subnet.cidrBlock || "")}${subnet.prohibitPublicIpOnVnic ? " · 禁止公网 IP" : ""}</option>`,
+                            )
+                            .join("")
+                        : oracleCreateSelectEmpty("所选 VCN 没有子网")
+                    }
+                  </select>
+                  ${icon("chevron-down")}
+                </span>
+              </label>
+            </div>
+
+            <label class="switch-row">
+              <span>
+                <strong>分配公网 IPv4</strong>
+                <small>需要子网允许公网 IP。OCI 仅分配一个公网 IPv4；私有地址由 VCN 自动提供。</small>
+              </span>
+              <input type="checkbox" id="oracle-create-public-ip" ${state.oracleCreate.assignPublicIp ? "checked" : ""} ${disabled ? "disabled" : ""} />
+              <span class="switch-control"></span>
+            </label>
+
+            ${
+              selectedSubnet?.prohibitPublicIpOnVnic
+                ? `<div class="inline-note">${icon("alert")} 所选子网禁止公网 IP；实例仍可创建，但无法从公网直接访问。</div>`
+                : ""
+            }
+          </section>
+
+          <section class="form-card form-card-advanced">
+            <details class="advanced-panel"${state.create.advancedOpen ? " open" : ""}>
+              <summary>
+                <span class="form-step">03</span>
+                <span class="advanced-summary-copy">
+                  <strong>SSH 与初始化</strong>
+                  <small>至少一个公钥；可附加 Cloud-init 用户数据</small>
+                </span>
+                ${icon("chevron-down")}
+              </summary>
+              <div class="advanced-content">
+                <label class="form-field">
+                  <span class="field-label">SSH 公钥</span>
+                  <textarea
+                    id="oracle-create-ssh-keys"
+                    rows="4"
+                    placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... user@example"
+                    spellcheck="false"
+                    ${disabled ? "disabled" : ""}
+                  >${escapeHtml(state.oracleCreate.sshKeys)}</textarea>
+                  <span class="field-hint">每行一个公钥，会写入 OCI 实例 metadata 的 <code>ssh_authorized_keys</code>。至少需要一个。</span>
+                </label>
+                <label class="form-field">
+                  <span class="field-label">Cloud-init 用户数据 <em>可选</em></span>
+                  <textarea
+                    id="oracle-create-user-data"
+                    rows="5"
+                    placeholder="#cloud-config&#10;package_update: true"
+                    spellcheck="false"
+                    ${disabled ? "disabled" : ""}
+                  >${escapeHtml(state.oracleCreate.userData)}</textarea>
+                  <span class="field-hint">服务端会以 Base64 写入 <code>user_data</code>，最大 64 KB。</span>
+                </label>
+              </div>
+            </details>
+          </section>
+
+          ${
+            errors.length > 0 || empty.length > 0
+              ? `<div class="summary-status summary-status-warn oci-create-warning">
+                  ${icon("info")}
+                  <span>
+                    ${errors.length > 0 ? escapeHtml(errors.join("；")) : ""}
+                    ${errors.length > 0 && empty.length > 0 ? "；" : ""}
+                    ${empty.length > 0 ? `以下资源为空：${escapeHtml(empty.join("、"))}。请检查 IAM 权限，或到 OCI 控制台创建缺少的 VCN/子网。` : ""}
+                  </span>
+                </div>`
+              : ""
+          }
+
+          ${
+            state.oracleCreateError
+              ? `<div class="form-alert" role="alert">${icon("alert")}<span>${escapeHtml(state.oracleCreateError)}</span></div>`
+              : ""
+          }
+
+          <button type="submit" class="button button-primary button-block create-mobile-submit" ${disabled || !accounts.length ? "disabled" : ""}>
+            ${busy ? spinner() : icon("zap")}
+            <span>${busy ? "正在提交创建…" : "创建 OCI 实例"}</span>
+          </button>
+        </form>
+
+        <aside class="create-summary" aria-label="OCI 配置摘要">
+          <div class="summary-heading">
+            <span>OCI 配置摘要</span>
+            <span class="summary-live"><i></i> OCI API</span>
+          </div>
+          <div class="summary-region">
+            <span class="summary-flag">${countryFlag(region?.country)}</span>
+            <span>
+              <strong>${escapeHtml(region?.label || account?.region || "未选择区域")}</strong>
+              <small>${escapeHtml(account?.label || "未选择 OCI 账户")}</small>
+            </span>
+          </div>
+          <div class="summary-divider"></div>
+          <dl class="summary-list">
+            <div><dt>实例名称</dt><dd>${escapeHtml(state.oracleCreate.label || "自动生成")}</dd></div>
+            <div><dt>Compartment</dt><dd title="${escapeHtml(state.oracleCreate.compartmentId)}">${escapeHtml(selectedCompartment?.name || state.oracleCreate.compartmentId || "—")}</dd></div>
+            <div><dt>可用域</dt><dd>${escapeHtml(state.oracleCreate.availabilityDomain || "—")}</dd></div>
+            <div><dt>Shape</dt><dd>${escapeHtml(selectedShape?.name || "未选择")}</dd></div>
+            <div><dt>计算资源</dt><dd>${escapeHtml(shapeDescription)}</dd></div>
+            <div><dt>系统镜像</dt><dd>${escapeHtml(selectedImage ? oracleImageOptionLabel(selectedImage) : "未选择")}</dd></div>
+            <div><dt>VCN / 子网</dt><dd>${escapeHtml(selectedVcn?.displayName || "未选择")} / ${escapeHtml(selectedSubnet?.displayName || "未选择")}</dd></div>
+            <div><dt>公网 IPv4</dt><dd>${state.oracleCreate.assignPublicIp ? "分配（若子网允许）" : "不分配"}</dd></div>
+            <div><dt>登录方式</dt><dd>SSH 公钥</dd></div>
+          </dl>
+          <div class="summary-divider"></div>
+          <div class="cost-block">
+            <span class="cost-label">预计费用</span>
+            <span class="cost-value">OCI<small>按实际用量</small></span>
+            <span class="cost-hourly">具体费用由 OCI 计费与免费额度决定。</span>
+          </div>
+          ${
+            resourcesLoading
+              ? `<div class="summary-status">${spinner()} 正在读取 OCI 资源…</div>`
+              : ""
+          }
+          <button
+            type="submit"
+            form="oracle-create-form"
+            class="button button-primary button-block create-submit"
+            ${disabled || !accounts.length ? "disabled" : ""}
+          >
+            ${busy ? spinner() : icon("zap")}
+            <span>${busy ? "正在提交创建…" : "创建 OCI 实例"}</span>
+          </button>
+          <p class="summary-note">${icon("shield")} 创建是异步操作；实例会先进入 PROVISIONING。OCI 私钥只在本地服务端使用。</p>
+        </aside>
+      </div>
+    </section>
+  `;
+}
+
+function oracleCreateAccountsFromState(state) {
+  const accounts = Array.isArray(state.settings?.oracleAccounts)
+    ? state.settings.oracleAccounts
+    : [];
+  return accounts;
+}
+
 
 export function renderSettings(state) {
   if (!state.settings) {
@@ -1449,7 +1919,7 @@ export function renderSettings(state) {
                               <span class="provider-chip provider-oracle">OCI</span>
                             </span>
                             <span class="token-row-meta">
-                              <span class="mono">${escapeHtml(account.region)}</span>
+                              <span title="${escapeHtml(account.region)}">${escapeHtml(getRegion(state, account.region)?.label || account.region)}</span>
                               <span>租户 …${escapeHtml(String(account.tenancyId || "").slice(-10))}</span>
                               <span>指纹 …${escapeHtml(String(account.fingerprint || "").slice(-8))}</span>
                               <span>验证于 ${escapeHtml(relativeTime(account.lastVerifiedAt))}</span>
@@ -1473,7 +1943,7 @@ export function renderSettings(state) {
 
           <p class="settings-note">
             ${icon("info")}
-            <span>建议使用专用 IAM 用户，并授予目标 Compartment 的 <code>manage instances</code> 权限；如需自动发现子 Compartment，还需 <code>inspect compartments</code>。</span>
+            <span>建议使用专用 IAM 用户。实例管理至少需要 <code>manage instances</code>；创建、监控、启动卷备份、串口和终止还需要网络、镜像、metrics、volume 与 console 权限，完整策略见 README。</span>
           </p>
           <div class="settings-actions">
             <a class="resource-link resource-link-inline" href="https://docs.oracle.com/en-us/iaas/Content/API/Concepts/apisigningkey.htm" target="_blank" rel="noreferrer">
@@ -1582,7 +2052,7 @@ export function renderSettings(state) {
             <li><span>${icon("check")}</span>Linode 使用最小权限令牌；Oracle 使用专用 IAM 用户和独立 API 密钥。</li>
             <li><span>${icon("check")}</span>令牌、OCI 私钥和代理密码加密保存在本机，不写入浏览器 localStorage。</li>
             <li><span>${icon("check")}</span>若需通过公网访问，请在前面加 HTTPS 反向代理，并限制来源 IP。</li>
-            <li><span>${icon("check")}</span>删除实例不可恢复；控制台会要求输入实例名称二次确认。</li>
+            <li><span>${icon("check")}</span>删除或终止实例不可恢复；控制台会要求输入实例名称二次确认。</li>
           </ul>
         </section>
 
@@ -1619,7 +2089,7 @@ export function renderDisconnected(state) {
         <span class="connect-mark">${icon("cloud")}</span>
         <span class="eyebrow">CLOUDVMCONTROLLER / LOCAL</span>
         <h1>连接你的云账户</h1>
-        <p>连接 Linode 或 Oracle Cloud，在一个本地控制面中查看实例、执行开关机与重启。Linode 还支持部署、监控和 IP 管理。</p>
+        <p>连接 Linode 或 Oracle Cloud，在一个本地控制面中查看实例、执行开关机与重启。Linode 支持部署、监控和 IP 管理；OCI 支持创建、监控、启动卷备份和串口控制台。</p>
         <div class="connect-actions">
           <button type="button" class="button button-primary" data-action="open-token">
             ${icon("key")} 连接 Linode
@@ -2125,6 +2595,536 @@ export function renderIpRenewModal(state) {
   `;
 }
 
+export function renderOracleBackupModal(state) {
+  const modal = state.modal;
+  if (!modal || modal.type !== "oracle-backup") {
+    return "";
+  }
+  const instance = modal.instance || {};
+  return `
+    <div class="modal-layer">
+      <div class="modal-backdrop" data-action="close-modal"></div>
+      <section class="modal-card modal-oci-backup" role="dialog" aria-modal="true" aria-labelledby="oracle-backup-title">
+        <button type="button" class="icon-button modal-close" data-action="close-modal" aria-label="关闭" ${modal.busy ? "disabled" : ""}>${icon("x")}</button>
+        <span class="modal-mark">${icon("disk")}</span>
+        <span class="eyebrow">BOOT VOLUME BACKUP</span>
+        <h2 id="oracle-backup-title">创建启动卷备份</h2>
+        <p>为 <strong>${escapeHtml(instance.label || "OCI 实例")}</strong> 的启动卷创建备份。OCI 备份是启动卷快照，不是完整实例快照，也不会自动恢复整台实例。</p>
+
+        <div class="form-alert${modal.error ? "" : " is-hidden"}" id="oracle-backup-error" role="alert">
+          ${icon("alert")}<span>${escapeHtml(modal.error || "")}</span>
+        </div>
+
+        <form id="oracle-backup-form" novalidate>
+          <label class="form-field">
+            <span class="field-label">备份名称</span>
+            <input type="text" id="oracle-backup-name" maxlength="255" value="${escapeHtml(modal.displayName || "")}" ${modal.busy ? "disabled" : ""} />
+            <span class="field-hint">最多 255 个字符。创建后在 OCI 控制台可看到同一名称。</span>
+          </label>
+          <label class="form-field">
+            <span class="field-label">备份类型</span>
+            <span class="select-wrap">
+              <span class="select-leading">${icon("disk")}</span>
+              <select id="oracle-backup-type" ${modal.busy ? "disabled" : ""}>
+                <option value="INCREMENTAL"${modal.backupType !== "FULL" ? " selected" : ""}>增量备份（推荐，体积更小）</option>
+                <option value="FULL"${modal.backupType === "FULL" ? " selected" : ""}>完整备份</option>
+              </select>
+              ${icon("chevron-down")}
+            </span>
+          </label>
+          <div class="ip-swap-note">
+            ${icon("info")}
+            <span>备份创建是异步操作，可能需要数分钟到数小时才变为 AVAILABLE。备份会占用 OCI 存储并产生费用；恢复时通常需要基于该备份创建新的启动卷。</span>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="button button-secondary" data-action="close-modal" ${modal.busy ? "disabled" : ""}>取消</button>
+            <button type="submit" class="button button-primary" ${modal.busy ? "disabled" : ""}>
+              ${modal.busy ? spinner() : icon("disk")}
+              <span>${modal.busy ? "正在提交…" : "创建备份"}</span>
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  `;
+}
+
+export function renderOracleBackupDeleteModal(state) {
+  const modal = state.modal;
+  if (!modal || modal.type !== "oracle-backup-delete") {
+    return "";
+  }
+  const backup = modal.backup || {};
+  return `
+    <div class="modal-layer">
+      <div class="modal-backdrop" data-action="close-modal"></div>
+      <section class="modal-card modal-delete modal-oci-backup" role="dialog" aria-modal="true" aria-labelledby="oracle-backup-delete-title">
+        <button type="button" class="icon-button modal-close" data-action="close-modal" aria-label="关闭" ${modal.busy ? "disabled" : ""}>${icon("x")}</button>
+        <span class="modal-mark modal-mark-danger">${icon("trash")}</span>
+        <span class="eyebrow eyebrow-danger">DELETE BOOT VOLUME BACKUP</span>
+        <h2 id="oracle-backup-delete-title">删除启动卷备份</h2>
+        <p>将永久删除 <strong>${escapeHtml(backup.displayName || backup.id || "该备份")}</strong>。这会删除该时间点的启动卷恢复点，无法撤销。</p>
+        <div class="form-alert${modal.error ? "" : " is-hidden"}" id="oracle-backup-delete-error" role="alert">
+          ${icon("alert")}<span>${escapeHtml(modal.error || "")}</span>
+        </div>
+        <form id="oracle-backup-delete-form">
+          <label class="simple-checkbox ip-renew-confirm">
+            <input type="checkbox" id="oracle-backup-delete-confirm" ${modal.confirmed ? "checked" : ""} ${modal.busy ? "disabled" : ""} />
+            <span>${icon("check")}</span>
+            <span>我确认删除这个 OCI 启动卷备份</span>
+          </label>
+          <div class="modal-actions">
+            <button type="button" class="button button-secondary" data-action="close-modal" ${modal.busy ? "disabled" : ""}>取消</button>
+            <button type="submit" class="button button-danger" ${modal.busy || !modal.confirmed ? "disabled" : ""}>
+              ${modal.busy ? spinner() : icon("trash")}
+              <span>${modal.busy ? "正在删除…" : "删除备份"}</span>
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  `;
+}
+
+export function renderOracleConsoleModal(state) {
+  const modal = state.modal;
+  if (!modal || modal.type !== "oracle-console") {
+    return "";
+  }
+  const instance = modal.instance || {};
+  return `
+    <div class="modal-layer">
+      <div class="modal-backdrop" data-action="close-modal"></div>
+      <section class="modal-card modal-oci-console" role="dialog" aria-modal="true" aria-labelledby="oracle-console-title">
+        <button type="button" class="icon-button modal-close" data-action="close-modal" aria-label="关闭" ${modal.busy ? "disabled" : ""}>${icon("x")}</button>
+        <span class="modal-mark">${icon("terminal")}</span>
+        <span class="eyebrow">SERIAL CONSOLE CONNECTION</span>
+        <h2 id="oracle-console-title">创建 OCI 串口连接</h2>
+        <p>为 <strong>${escapeHtml(instance.label || "OCI 实例")}</strong> 创建 SSH 串口连接。浏览器只显示 OCI 返回的 SSH 命令，不会在浏览器内建立交互终端，也不会保存你的私钥。</p>
+
+        <div class="form-alert${modal.error ? "" : " is-hidden"}" id="oracle-console-error" role="alert">
+          ${icon("alert")}<span>${escapeHtml(modal.error || "")}</span>
+        </div>
+
+        <form id="oracle-console-form" novalidate>
+          <label class="form-field">
+            <span class="field-label">RSA 公钥</span>
+            <textarea id="oracle-console-public-key" rows="5" placeholder="ssh-rsa AAAAB3NzaC1yc2E... user@example" spellcheck="false" ${modal.busy ? "disabled" : ""}>${escapeHtml(modal.publicKey || "")}</textarea>
+            <span class="field-hint">OCI 串口控制台要求 RSA 公钥。请把对应私钥保存在本机；连接串会出现在实例详情里。</span>
+          </label>
+          <div class="ip-swap-note">
+            ${icon("info")}
+            <span>创建后可复制 OCI 提供的 SSH 命令，并用本机私钥连接。主机指纹会显示在详情中；连接前请核对 <code>serviceHostKeyFingerprint</code>。</span>
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="button button-secondary" data-action="close-modal" ${modal.busy ? "disabled" : ""}>取消</button>
+            <button type="submit" class="button button-primary" ${modal.busy ? "disabled" : ""}>
+              ${modal.busy ? spinner() : icon("terminal")}
+              <span>${modal.busy ? "正在创建…" : "创建串口连接"}</span>
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  `;
+}
+
+export function renderOracleTerminateModal(state) {
+  const modal = state.modal;
+  if (!modal || modal.type !== "oracle-terminate") {
+    return "";
+  }
+  const instance = modal.instance || {};
+  const expected = instance.label || "";
+  const confirmationMatches =
+    String(modal.confirmation || "").trim() === expected;
+  return `
+    <div class="modal-layer">
+      <div class="modal-backdrop" data-action="close-modal"></div>
+      <section class="modal-card modal-delete modal-oci-terminate" role="dialog" aria-modal="true" aria-labelledby="oracle-terminate-title">
+        <button type="button" class="icon-button modal-close" data-action="close-modal" aria-label="关闭" ${modal.busy ? "disabled" : ""}>${icon("x")}</button>
+        <span class="modal-mark modal-mark-danger">${icon("trash")}</span>
+        <span class="eyebrow eyebrow-danger">TERMINATE OCI INSTANCE</span>
+        <h2 id="oracle-terminate-title">终止 OCI 实例</h2>
+        <p>这是不可逆的异步操作。OCI 会终止 <strong>${escapeHtml(expected || "该实例")}</strong>，实例状态会先变为 TERMINATING，随后从活动实例列表消失。</p>
+
+        <div class="form-alert${modal.error ? "" : " is-hidden"}" id="oracle-terminate-error" role="alert">
+          ${icon("alert")}<span>${escapeHtml(modal.error || "")}</span>
+        </div>
+
+        <form id="oracle-terminate-form" novalidate>
+          <label class="form-field">
+            <span class="field-label">输入实例名以确认</span>
+            <input type="text" id="oracle-terminate-confirmation" autocomplete="off" placeholder="${escapeHtml(expected)}" value="${escapeHtml(modal.confirmation || "")}" ${modal.busy ? "disabled" : ""} />
+            <span class="field-hint">必须与实例显示名称完全一致：<code>${escapeHtml(expected)}</code></span>
+          </label>
+          <label class="switch-row">
+            <span>
+              <strong>保留启动卷</strong>
+              <small>保留启动卷可避免数据立即删除，但仍会继续占用 OCI 存储和产生费用。它不等于保留整台实例。</small>
+            </span>
+            <input type="checkbox" id="oracle-terminate-preserve-boot" ${modal.preserveBootVolume ? "checked" : ""} ${modal.busy ? "disabled" : ""} />
+            <span class="switch-control"></span>
+          </label>
+          <label class="switch-row">
+            <span>
+              <strong>保留随实例创建的数据卷</strong>
+              <small>OCI 默认保留随实例创建的数据卷。取消勾选会同时删除这些数据卷。</small>
+            </span>
+            <input type="checkbox" id="oracle-terminate-preserve-data" ${modal.preserveDataVolumes !== false ? "checked" : ""} ${modal.busy ? "disabled" : ""} />
+            <span class="switch-control"></span>
+          </label>
+          <div class="modal-actions">
+            <button type="button" class="button button-secondary" data-action="close-modal" ${modal.busy ? "disabled" : ""}>取消</button>
+            <button type="submit" class="button button-danger" ${modal.busy || !confirmationMatches ? "disabled" : ""}>
+              ${modal.busy ? spinner() : icon("trash")}
+              <span>${modal.busy ? "正在提交…" : "终止实例"}</span>
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  `;
+}
+
+function formatByteRate(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return "—";
+  }
+  if (numericValue >= 1_000_000_000) {
+    return `${(numericValue / 1_000_000_000).toFixed(2)} GB/s`;
+  }
+  if (numericValue >= 1_000_000) {
+    return `${(numericValue / 1_000_000).toFixed(2)} MB/s`;
+  }
+  if (numericValue >= 1000) {
+    return `${(numericValue / 1000).toFixed(1)} KB/s`;
+  }
+  return `${Math.round(numericValue)} B/s`;
+}
+
+function oracleMetricByKey(metrics = [], key) {
+  return (Array.isArray(metrics) ? metrics : []).find(
+    (metric) => metric?.key === key,
+  ) || null;
+}
+
+function formatChartAxisTime(value, window) {
+  const date =
+    typeof value === "number" || /^\d+$/.test(String(value || ""))
+      ? new Date(Number(value))
+      : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "—";
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: window === "7d" ? "2-digit" : undefined,
+    day: window === "7d" ? "2-digit" : undefined,
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function oracleStatePill(value) {
+  const state = String(value || "").toUpperCase();
+  const map = {
+    AVAILABLE: ["可用", "ok"],
+    ACTIVE: ["已连接", "ok"],
+    SUCCEEDED: ["已就绪", "ok"],
+    REQUESTED: ["已请求", "pending"],
+    "GETTING-HISTORY": ["采集中", "pending"],
+    CREATING: ["创建中", "pending"],
+    ATTACHING: ["挂载中", "pending"],
+    TERMINATING: ["删除中", "danger"],
+    TERMINATED: ["已删除", "danger"],
+    FAILED: ["失败", "danger"],
+    FAULTY: ["异常", "danger"],
+  };
+  const [label, tone] = map[state] || [state || "未知", "pending"];
+  return `<span class="oci-state oci-state-${tone}">${escapeHtml(label)}</span>`;
+}
+
+function renderOracleMonitoring(state, detail, instance) {
+  const bundle = detail.data?.oracleMetrics;
+  const loading = Boolean(state.detail?.oracleMetricsLoading);
+  const window =
+    state.detail?.oracleMetricsWindow || bundle?.window || "24h";
+  const metrics = Array.isArray(bundle?.metrics) ? bundle.metrics : [];
+  const cpu = oracleMetricByKey(metrics, "cpu");
+  const memory = oracleMetricByKey(metrics, "memory");
+  const load = oracleMetricByKey(metrics, "load");
+  const networkIn = oracleMetricByKey(metrics, "networkIn");
+  const networkOut = oracleMetricByKey(metrics, "networkOut");
+  const diskRead = oracleMetricByKey(metrics, "diskRead");
+  const diskWrite = oracleMetricByKey(metrics, "diskWrite");
+  const cpuPoints = extractPoints(cpu?.points);
+  const memoryPoints = extractPoints(memory?.points);
+  const networkInPoints = extractPoints(networkIn?.points);
+  const networkOutPoints = extractPoints(networkOut?.points);
+  const diskReadPoints = extractPoints(diskRead?.points);
+  const diskWritePoints = extractPoints(diskWrite?.points);
+  const latestCpu = latestValue(cpuPoints);
+  const latestMemory = latestValue(memoryPoints);
+  const latestLoad = latestValue(load?.points);
+  const latestNetworkIn = latestValue(networkInPoints);
+  const errors = Array.isArray(bundle?.errors) ? bundle.errors : [];
+  const emptyReason =
+    bundle?.emptyReason ||
+    "OCI 未返回监控数据。请确认实例已启用 Compute Instance Monitoring 插件并且 Oracle Cloud Agent 正常运行。";
+  const rangeLabels = {
+    "1h": "1 小时",
+    "6h": "6 小时",
+    "24h": "24 小时",
+    "7d": "7 天",
+  };
+
+  return `
+    <div class="oci-metric-toolbar">
+      <span class="chart-legend">${icon("activity")} 数据源：oci_computeagent · ${escapeHtml(bundle?.resolution || "5m")} 粒度</span>
+      <span class="oci-range-switch" role="group" aria-label="监控时间范围">
+        ${Object.entries(rangeLabels)
+          .map(
+            ([value, label]) => `<button type="button" class="oci-range-option${window === value ? " is-active" : ""}" data-action="oci-metric-window" data-window="${value}" ${loading ? "disabled" : ""}>${escapeHtml(label)}</button>`,
+          )
+          .join("")}
+      </span>
+    </div>
+    ${
+      loading
+        ? `<div class="drawer-transition">${spinner()} 正在刷新 OCI 监控指标…</div>`
+        : ""
+    }
+    ${
+      errors.length > 0
+        ? `<div class="inline-error"><span class="inline-error-icon">${icon("alert")}</span><span><strong>部分监控指标不可用</strong><small>${escapeHtml(errors.map((entry) => entry.message).join("；"))}</small></span></div>`
+        : ""
+    }
+    ${
+      !bundle || (metrics.every((metric) => !extractPoints(metric.points).length) && !loading)
+        ? `<div class="chart-empty oci-chart-empty">${escapeHtml(emptyReason)}</div>`
+        : `
+          <div class="metric-grid oci-metric-grid">
+            ${metricCard("CPU", latestCpu === null ? "—" : formatPercent(latestCpu, 1), "cpu", `${rangeLabels[window]}最新值`)}
+            ${metricCard("内存", latestMemory === null ? "—" : formatPercent(latestMemory, 1), "memory", "Compute Agent")}
+            ${metricCard("负载", latestLoad === null ? "—" : formatNumber(Number(latestLoad).toFixed(2)), "activity", "1 分钟平均")}
+            ${metricCard("入站", latestNetworkIn === null ? "—" : formatByteRate(latestNetworkIn), "network", "网络接收")}
+          </div>
+          <div class="oci-monitor-charts">
+            <div class="chart-card">
+              <div class="chart-heading">
+                <div><span class="panel-kicker">CPU + MEMORY</span><h3>处理器与内存</h3></div>
+                <span class="chart-legend">
+                  <span><i class="legend-dot legend-green"></i>CPU</span>
+                  <span><i class="legend-dot legend-blue"></i>内存</span>
+                </span>
+              </div>
+              ${renderLineChart(
+                [
+                  { points: cpuPoints },
+                  { points: memoryPoints },
+                ],
+                {
+                  height: 210,
+                  colors: ["#4ade80", "#60a5fa"],
+                  maxValueOverride: 100,
+                },
+              )}
+              <div class="chart-axis"><span>${escapeHtml(formatChartAxisTime(bundle?.startTime, window))}</span><span>现在</span></div>
+            </div>
+            <div class="chart-card">
+              <div class="chart-heading">
+                <div><span class="panel-kicker">NETWORK</span><h3>网络吞吐</h3></div>
+                <span class="chart-legend">
+                  <span><i class="legend-dot legend-green"></i>入站</span>
+                  <span><i class="legend-dot legend-blue"></i>出站</span>
+                </span>
+              </div>
+              ${renderLineChart(
+                [
+                  { points: networkInPoints },
+                  { points: networkOutPoints },
+                ],
+                { height: 210, colors: ["#4ade80", "#60a5fa"] },
+              )}
+              <div class="chart-axis"><span>${escapeHtml(formatChartAxisTime(bundle?.startTime, window))}</span><span>现在</span></div>
+            </div>
+            <div class="chart-card">
+              <div class="chart-heading">
+                <div><span class="panel-kicker">DISK I/O</span><h3>磁盘吞吐</h3></div>
+                <span class="chart-legend">
+                  <span><i class="legend-dot legend-green"></i>读取</span>
+                  <span><i class="legend-dot legend-blue"></i>写入</span>
+                </span>
+              </div>
+              ${renderLineChart(
+                [
+                  { points: diskReadPoints },
+                  { points: diskWritePoints },
+                ],
+                { height: 210, colors: ["#4ade80", "#60a5fa"] },
+              )}
+              <div class="chart-axis"><span>${escapeHtml(formatChartAxisTime(bundle?.startTime, window))}</span><span>现在</span></div>
+            </div>
+          </div>
+        `
+    }
+    <div class="network-swap-row">
+      <span>${icon("info")} 监控依赖 Compute Instance Monitoring 插件。插件未启用、Agent 未运行或实例无监控服务出口时，OCI 不会返回数据；本控制台不会伪造指标。</span>
+    </div>
+  `;
+}
+
+function renderOracleBackups(state, detail, instance) {
+  const bundle = detail.data?.oracleBackups;
+  const bootVolume = bundle?.bootVolume || null;
+  const backups = Array.isArray(bundle?.backups) ? bundle.backups : [];
+  const busy = Boolean(state.detail?.oracleOpsBusy);
+  return `
+    <div class="oci-resource-toolbar">
+      <span>${bootVolume ? `启动卷 ${escapeHtml(bootVolume.displayName || bootVolume.id)}${Number.isFinite(Number(bootVolume.sizeInGBs)) ? ` · ${formatNumber(bootVolume.sizeInGBs)} GB` : ""}` : "启动卷信息不可用"}</span>
+      <button type="button" class="button button-secondary button-sm" data-action="oci-backup-create" data-id="${escapeHtml(instance.id)}" data-token-id="${escapeHtml(instance.accountId || instance.tokenId || "")}" ${busy || !bootVolume ? "disabled" : ""}>
+        ${icon("plus")} 创建启动卷备份
+      </button>
+    </div>
+    ${
+      bundle?.error
+        ? `<div class="inline-error"><span class="inline-error-icon">${icon("alert")}</span><span><strong>备份信息不可用</strong><small>${escapeHtml(bundle.error)}</small></span></div>`
+        : !bootVolume
+          ? `<p class="muted-copy">${escapeHtml(bundle?.emptyReason || "没有找到该实例的启动卷附件，或当前凭据无权读取 Block Storage。")}</p>`
+          : backups.length === 0
+            ? `<p class="muted-copy">${escapeHtml(bundle?.emptyReason || "该启动卷还没有备份。创建备份后会保留该时间点的启动卷快照。")}</p>`
+            : `<div class="oci-resource-list">
+                ${backups
+                  .map(
+                    (backup) => `
+                      <article class="oci-resource-row">
+                        <span class="oci-resource-icon">${icon("disk")}</span>
+                        <span class="oci-resource-copy">
+                          <strong>${escapeHtml(backup.displayName || backup.id)}</strong>
+                          <small class="mono">${escapeHtml(backup.type || "BACKUP")} · ${Number.isFinite(Number(backup.sizeInGBs)) ? `${formatNumber(backup.sizeInGBs)} GB` : "—"} · ${escapeHtml(formatDateTime(backup.timeCreated))}</small>
+                        </span>
+                        ${oracleStatePill(backup.lifecycleState)}
+                        <button type="button" class="text-button text-button-danger" data-action="oci-backup-delete" data-id="${escapeHtml(instance.id)}" data-token-id="${escapeHtml(instance.accountId || instance.tokenId || "")}" data-backup-id="${escapeHtml(backup.id)}" ${busy ? "disabled" : ""}>删除</button>
+                      </article>
+                    `,
+                  )
+                  .join("")}
+              </div>`
+    }
+    <div class="network-swap-row">
+      <span>${icon("info")} 这里管理的是 OCI <strong>启动卷备份</strong>，不是整机快照。恢复时通常需要从备份创建新启动卷；备份、恢复和存储都会产生 OCI 费用。</span>
+    </div>
+  `;
+}
+
+function renderOracleConsole(state, detail, instance) {
+  const bundle = detail.data?.oracleConsole;
+  const connections = Array.isArray(bundle?.connections)
+    ? bundle.connections
+    : [];
+  const histories = Array.isArray(bundle?.histories) ? bundle.histories : [];
+  const busy = state.detail?.oracleOpsBusy || "";
+  const historyData = detail.data?.oracleConsoleHistory;
+  return `
+    <div class="oci-resource-toolbar">
+      <span>SSH 串口连接 · ${connections.length} 个连接 · ${histories.length} 条历史</span>
+      <span class="oci-toolbar-actions">
+        <button type="button" class="button button-secondary button-sm" data-action="oci-console-connect" data-id="${escapeHtml(instance.id)}" data-token-id="${escapeHtml(instance.accountId || instance.tokenId || "")}" ${busy ? "disabled" : ""}>
+          ${icon("plus")} 创建串口连接
+        </button>
+        <button type="button" class="button button-secondary button-sm" data-action="oci-console-capture" data-id="${escapeHtml(instance.id)}" data-token-id="${escapeHtml(instance.accountId || instance.tokenId || "")}" ${busy ? "disabled" : ""}>
+          ${busy === "history:create" ? spinner() : icon("terminal")} 采集控制台日志
+        </button>
+      </span>
+    </div>
+    ${
+      bundle?.error
+        ? `<div class="inline-error"><span class="inline-error-icon">${icon("alert")}</span><span><strong>串口控制台信息不可用</strong><small>${escapeHtml(bundle.error)}</small></span></div>`
+        : ""
+    }
+    ${
+      connections.length === 0
+        ? `<p class="muted-copy">还没有 OCI 串口连接。创建时需要一个 RSA 公钥；浏览器不会保存对应私钥。</p>`
+        : `<div class="oci-resource-list">
+            ${connections
+              .map(
+                (connection) => `
+                  <article class="oci-resource-row oci-console-row">
+                    <span class="oci-resource-icon">${icon("terminal")}</span>
+                    <span class="oci-resource-copy">
+                      <strong>串口连接 ${escapeHtml(String(connection.id || "").slice(-12))}</strong>
+                      <small class="mono">主机指纹 ${escapeHtml(connection.serviceHostKeyFingerprint || "—")}</small>
+                      <small class="mono">用户密钥指纹 ${escapeHtml(connection.fingerprint || "—")}</small>
+                      ${
+                        connection.connectionString
+                          ? `<details class="oci-command">
+                              <summary>查看 SSH 连接串</summary>
+                              <pre class="mono">${escapeHtml(connection.connectionString)}</pre>
+                            </details>`
+                          : ""
+                      }
+                    </span>
+                    ${oracleStatePill(connection.lifecycleState)}
+                    <span class="oci-row-actions">
+                      ${
+                        connection.connectionString
+                          ? `<button type="button" class="text-button" data-copy="${escapeHtml(connection.connectionString)}">复制命令</button>`
+                          : ""
+                      }
+                      <button type="button" class="text-button text-button-danger" data-action="oci-console-disconnect" data-id="${escapeHtml(instance.id)}" data-token-id="${escapeHtml(instance.accountId || instance.tokenId || "")}" data-connection-id="${escapeHtml(connection.id)}" ${busy ? "disabled" : ""}>删除</button>
+                    </span>
+                  </article>
+                `,
+              )
+              .join("")}
+          </div>`
+    }
+    ${
+      histories.length > 0
+        ? `<div class="oci-history-heading">
+            <span class="panel-kicker">CONSOLE HISTORY</span>
+            <h4>控制台启动日志</h4>
+          </div>
+          <div class="oci-resource-list">
+            ${histories
+              .map(
+                (history) => `
+                  <article class="oci-resource-row">
+                    <span class="oci-resource-icon">${icon("terminal")}</span>
+                    <span class="oci-resource-copy">
+                      <strong>${escapeHtml(history.displayName || "控制台历史")}</strong>
+                      <small class="mono">${escapeHtml(formatDateTime(history.timeCreated))}</small>
+                    </span>
+                    ${oracleStatePill(history.lifecycleState)}
+                    <span class="oci-row-actions">
+                      <button type="button" class="text-button" data-action="oci-console-history" data-id="${escapeHtml(instance.id)}" data-token-id="${escapeHtml(instance.accountId || instance.tokenId || "")}" data-history-id="${escapeHtml(history.id)}" ${busy ? "disabled" : ""} ${["SUCCEEDED", "AVAILABLE"].includes(String(history.lifecycleState || "").toUpperCase()) ? "" : "disabled"}>查看</button>
+                      <button type="button" class="text-button text-button-danger" data-action="oci-console-history-delete" data-id="${escapeHtml(instance.id)}" data-token-id="${escapeHtml(instance.accountId || instance.tokenId || "")}" data-history-id="${escapeHtml(history.id)}" ${busy ? "disabled" : ""}>删除</button>
+                    </span>
+                  </article>
+                `,
+              )
+              .join("")}
+          </div>`
+        : ""
+    }
+    ${
+      historyData
+        ? `<div class="oci-console-output">
+            <div class="oci-console-output-heading">
+              <span>${icon("terminal")} 最近采集的控制台文本${historyData.length ? ` · ${formatNumber(historyData.length)} 字符` : ""}</span>
+              <button type="button" class="text-button" data-action="oci-console-history-close">关闭</button>
+            </div>
+            <pre class="mono">${escapeHtml(historyData.text || "未读取到控制台文本。")}</pre>
+          </div>`
+        : ""
+    }
+    <div class="network-swap-row">
+      <span>${icon("shield")} ${escapeHtml(bundle?.publicKeyHint || "浏览器内不建立交互式串口终端。请复制 OCI 返回的 SSH 命令，在本机使用私钥连接，并核对服务主机指纹。")}</span>
+    </div>
+  `;
+}
+
 function renderOracleDrawerBody(state, detail, instance) {
   const ips = detail.data?.ips || {};
   const publicIps = Array.isArray(ips.publicIpv4s)
@@ -2141,6 +3141,7 @@ function renderOracleDrawerBody(state, detail, instance) {
   const isOffline = instance.status === "offline";
   const meta = getStatusMeta(instance.status);
   const tags = Array.isArray(instance.tags) ? instance.tags : [];
+  const region = getRegion(state, instance.region);
   const consoleUrl = `https://cloud.oracle.com/compute/instances/${encodeURIComponent(instance.id)}?region=${encodeURIComponent(instance.region)}`;
 
   return `
@@ -2228,7 +3229,7 @@ function renderOracleDrawerBody(state, detail, instance) {
       </div>
       <dl class="detail-meta-grid">
         <div><dt>所属账户</dt><dd>${escapeHtml(instance.accountLabel || "Oracle Cloud")}</dd></div>
-        <div><dt>区域</dt><dd>${escapeHtml(instance.region)}</dd></div>
+        <div><dt>区域</dt><dd>${countryFlag(region?.country)} ${escapeHtml(region?.label || instance.region)} <span class="mono">${escapeHtml(instance.region)}</span></dd></div>
         <div><dt>可用域</dt><dd>${escapeHtml(instance.availabilityDomain || "—")}</dd></div>
         <div><dt>Shape</dt><dd>${escapeHtml(instance.type || "—")}</dd></div>
         <div><dt>计算规格</dt><dd>${formatNumber(instance.specs?.ocpus)} OCPU · ${formatMemory(instance.specs?.memory)}</dd></div>
@@ -2246,12 +3247,43 @@ function renderOracleDrawerBody(state, detail, instance) {
 
     <section class="drawer-section">
       <div class="drawer-section-heading">
-        <span class="panel-kicker">OPERATIONS</span>
-        <h3>运维边界</h3>
+        <span class="panel-kicker">OBSERVABILITY</span>
+        <h3>OCI 监控</h3>
       </div>
-      <div class="network-swap-row">
-        <span>${icon("info")} 当前 OCI 接入支持实例发现、详情、启动、关闭和重启。监控、备份、串口控制台、终止实例和创建实例仍请在 OCI 控制台完成。</span>
+      ${renderOracleMonitoring(state, detail, instance)}
+    </section>
+
+    <section class="drawer-section">
+      <div class="drawer-section-heading">
+        <span class="panel-kicker">BOOT VOLUME BACKUPS</span>
+        <h3>启动卷备份</h3>
       </div>
+      ${renderOracleBackups(state, detail, instance)}
+    </section>
+
+    <section class="drawer-section">
+      <div class="drawer-section-heading">
+        <span class="panel-kicker">SERIAL CONSOLE</span>
+        <h3>串口控制台</h3>
+      </div>
+      ${renderOracleConsole(state, detail, instance)}
+    </section>
+
+    <section class="drawer-section danger-zone oci-danger-zone">
+      <div>
+        <strong>终止此 OCI 实例</strong>
+        <p>OCI 将异步终止实例。默认删除启动卷；可选择保留启动卷与随实例创建的数据卷，但保留的卷仍会产生存储费用。</p>
+      </div>
+      <button
+        type="button"
+        class="button button-danger-ghost button-sm"
+        data-action="oci-terminate"
+        data-id="${escapeHtml(instance.id)}"
+        data-token-id="${escapeHtml(instance.accountId || instance.tokenId || "")}"
+        ${isTransitional(instance.status) || instance.status === "deleting" ? "disabled" : ""}
+      >
+        ${icon("trash")} 终止实例
+      </button>
     </section>
   `;
 }

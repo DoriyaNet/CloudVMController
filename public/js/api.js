@@ -25,6 +25,17 @@ export function createApi({ onUnauthorized } = {}) {
     return `${path}${separator}${key}=${encodeURIComponent(value)}`;
   }
 
+  function withQueries(path, values = {}) {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(values)) {
+      if (value !== undefined && value !== null && value !== "") {
+        params.set(key, String(value));
+      }
+    }
+    const query = params.toString();
+    return query ? `${path}${path.includes("?") ? "&" : "?"}${query}` : path;
+  }
+
   async function request(
     path,
     { method = "GET", body, signal, skipUnauthorized = false } = {},
@@ -198,6 +209,135 @@ export function createApi({ onUnauthorized } = {}) {
         ),
         {
           method: "POST",
+          skipUnauthorized: true,
+        },
+      ),
+    oracleMetrics: (id, accountId, window = "24h", options) =>
+      request(
+        withQueries(
+          `/oracle/instances/${encodeURIComponent(id)}/metrics`,
+          { accountId, window },
+        ),
+        { ...options, skipUnauthorized: true },
+      ),
+    oracleBackups: (id, accountId, options) =>
+      request(
+        withQuery(
+          `/oracle/instances/${encodeURIComponent(id)}/backups`,
+          "accountId",
+          accountId,
+        ),
+        { ...options, skipUnauthorized: true },
+      ),
+    createOracleBackup: (id, accountId, payload) =>
+      request(
+        withQuery(
+          `/oracle/instances/${encodeURIComponent(id)}/backups`,
+          "accountId",
+          accountId,
+        ),
+        {
+          method: "POST",
+          body: payload,
+          skipUnauthorized: true,
+        },
+      ),
+    deleteOracleBackup: (id, backupId, accountId) =>
+      request(
+        withQuery(
+          `/oracle/instances/${encodeURIComponent(id)}/backups/${encodeURIComponent(backupId)}`,
+          "accountId",
+          accountId,
+        ),
+        { method: "DELETE", skipUnauthorized: true },
+      ),
+    oracleConsole: (id, accountId, options) =>
+      request(
+        withQuery(
+          `/oracle/instances/${encodeURIComponent(id)}/console`,
+          "accountId",
+          accountId,
+        ),
+        { ...options, skipUnauthorized: true },
+      ),
+    createOracleConsoleConnection: (id, accountId, payload) =>
+      request(
+        withQuery(
+          `/oracle/instances/${encodeURIComponent(id)}/console`,
+          "accountId",
+          accountId,
+        ),
+        {
+          method: "POST",
+          body: payload,
+          skipUnauthorized: true,
+        },
+      ),
+    deleteOracleConsoleConnection: (id, connectionId, accountId) =>
+      request(
+        withQuery(
+          `/oracle/instances/${encodeURIComponent(id)}/console/connections/${encodeURIComponent(connectionId)}`,
+          "accountId",
+          accountId,
+        ),
+        { method: "DELETE", skipUnauthorized: true },
+      ),
+    createOracleConsoleHistory: (id, accountId, payload = {}) =>
+      request(
+        withQuery(
+          `/oracle/instances/${encodeURIComponent(id)}/console/histories`,
+          "accountId",
+          accountId,
+        ),
+        {
+          method: "POST",
+          body: payload,
+          skipUnauthorized: true,
+        },
+      ),
+    oracleConsoleHistoryData: (id, historyId, accountId) =>
+      request(
+        withQuery(
+          `/oracle/instances/${encodeURIComponent(id)}/console/histories/${encodeURIComponent(historyId)}/data`,
+          "accountId",
+          accountId,
+        ),
+        { skipUnauthorized: true },
+      ),
+    deleteOracleConsoleHistory: (id, historyId, accountId) =>
+      request(
+        withQuery(
+          `/oracle/instances/${encodeURIComponent(id)}/console/histories/${encodeURIComponent(historyId)}`,
+          "accountId",
+          accountId,
+        ),
+        { method: "DELETE", skipUnauthorized: true },
+      ),
+    oracleCreateOptions: (accountId, { compartmentId, availabilityDomain } = {}) =>
+      request(
+        withQueries("/oracle/create-options", {
+          accountId,
+          compartmentId,
+          availabilityDomain,
+        }),
+        { skipUnauthorized: true },
+      ),
+    createOracleInstance: (payload) =>
+      request("/oracle/instances", {
+        method: "POST",
+        body: payload,
+        skipUnauthorized: true,
+      }),
+    terminateOracleInstance: (id, accountId, payload) =>
+      request(
+        withQuery(
+          `/oracle/instances/${encodeURIComponent(id)}`,
+          "accountId",
+          accountId,
+        ),
+        {
+          method: "DELETE",
+          body: payload,
           skipUnauthorized: true,
         },
       ),

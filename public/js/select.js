@@ -591,7 +591,7 @@ function focusInitialOption(menuState) {
 }
 
 function positionMenu(menuState) {
-  const { menu, trigger, doc } = menuState;
+  const { menu, trigger, select, doc } = menuState;
   const win = doc.defaultView || window;
   const viewportWidth =
     win.innerWidth || doc.documentElement?.clientWidth || MENU_MIN_WIDTH;
@@ -599,12 +599,19 @@ function positionMenu(menuState) {
     win.innerHeight || doc.documentElement?.clientHeight || 0;
   const triggerRect = trigger.getBoundingClientRect();
   const availableWidth = Math.max(1, viewportWidth - MENU_MARGIN * 2);
+  const requestedMinWidth = Number.parseFloat(
+    select.dataset.customMenuMinWidth,
+  );
+  const preferredMinWidth =
+    Number.isFinite(requestedMinWidth) && requestedMinWidth > 0
+      ? Math.max(MENU_MIN_WIDTH, requestedMinWidth)
+      : MENU_MIN_WIDTH;
   const width = Math.min(
-    Math.max(triggerRect.width, MENU_MIN_WIDTH),
+    Math.max(triggerRect.width, preferredMinWidth),
     MENU_MAX_WIDTH,
     availableWidth,
   );
-  const minWidth = Math.min(MENU_MIN_WIDTH, availableWidth);
+  const minWidth = Math.min(preferredMinWidth, availableWidth);
   const maxWidth = Math.min(MENU_MAX_WIDTH, availableWidth);
   const left = Math.max(
     MENU_MARGIN,

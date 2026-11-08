@@ -34,6 +34,36 @@ function json(response, status, payload, extraHeaders = {}) {
   response.end(body);
 }
 
+function text(response, status, payload, extraHeaders = {}) {
+  const body = String(payload);
+  response.writeHead(status, {
+    "content-type": "text/plain; charset=utf-8",
+    "content-length": Buffer.byteLength(body),
+    ...extraHeaders,
+  });
+  response.end(body);
+}
+
+function empty(response, status = 204) {
+  response.writeHead(status, {
+    "content-length": "0",
+  });
+  response.end();
+}
+
+function parseJson(value) {
+  try {
+    return JSON.parse(value || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function ocid(kind, region, suffix) {
+  const tail = `${String(suffix).padEnd(60, "0")}`.slice(0, 60);
+  return `ocid1.${kind}.oc1.${region}.${tail}`;
+}
+
 export async function createMockOracle() {
   const { privateKey, publicKey } = generateKeyPairSync("rsa", {
     modulusLength: 2048,
@@ -98,8 +128,209 @@ export async function createMockOracle() {
       ipv6Addresses: [],
     },
   };
+  const availabilityDomains = [
+    { name: "Uocm:US-ASHBURN-AD-1", compartmentId: tenancyId },
+    { name: "Uocm:US-ASHBURN-AD-2", compartmentId: tenancyId },
+    { name: "Uocm:US-ASHBURN-AD-3", compartmentId: tenancyId },
+  ];
+  const shapes = [
+    {
+      shape: "VM.Standard.A1.Flex",
+      processorDescription: "Ampere Altra",
+      ocpuOptions: [{ min: 1, max: 4 }],
+      memoryOptions: [{ minInGBs: 6, maxInGBs: 24 }],
+      isFlexible: true,
+    },
+    {
+      shape: "VM.Standard.E4.Flex",
+      processorDescription: "AMD EPYC",
+      ocpuOptions: [{ min: 1, max: 4 }],
+      memoryOptions: [{ minInGBs: 1, maxInGBs: 64 }],
+      isFlexible: true,
+    },
+    {
+      shape: "VM.Standard.E2.1.Micro",
+      processorDescription: "AMD EPYC",
+      ocpus: 1,
+      memoryInGBs: 1,
+      isFlexible: false,
+    },
+  ];
+  const images = [
+    {
+      id: ocid("image", "us-ashburn-1", "aaaaaaaaimage0000000000000000000000000000000001"),
+      displayName: "Oracle Linux 9",
+      operatingSystem: "Oracle Linux",
+      operatingSystemVersion: "9",
+      lifecycleState: "AVAILABLE",
+      sizeInGBs: 50,
+      timeCreated: "2026-09-01T00:00:00.000Z",
+      compartmentId: rootCompartmentId,
+    },
+    {
+      id: ocid("image", "us-ashburn-1", "aaaaaaaaimage0000000000000000000000000000000002"),
+      displayName: "Canonical Ubuntu 24.04",
+      operatingSystem: "Canonical Ubuntu",
+      operatingSystemVersion: "24.04",
+      lifecycleState: "AVAILABLE",
+      sizeInGBs: 50,
+      timeCreated: "2026-09-01T00:00:00.000Z",
+      compartmentId: rootCompartmentId,
+    },
+    {
+      id: ocid(
+        "image",
+        "us-ashburn-1",
+        "aaaaaaaaimage0000000000000000000000000000000003",
+      ),
+      displayName: "Custom Ubuntu 24.04",
+      operatingSystem: "Canonical Ubuntu",
+      operatingSystemVersion: "24.04",
+      lifecycleState: "AVAILABLE",
+      sizeInGBs: 80,
+      timeCreated: "2026-10-15T00:00:00.000Z",
+      compartmentId: childCompartmentId,
+    },
+  ];
+  const vcnId = ocid(
+    "vcn",
+    "us-ashburn-1",
+    "aaaaaaaavcn0000000000000000000000000000000000001",
+  );
+  const vcns = [
+    {
+      id: vcnId,
+      displayName: "oci-vcn",
+      cidrBlock: "10.0.0.0/16",
+      lifecycleState: "AVAILABLE",
+      compartmentId: rootCompartmentId,
+    },
+  ];
+  const subnetId = ocid(
+    "subnet",
+    "us-ashburn-1",
+    "aaaaaaaasubnet000000000000000000000000000000001",
+  );
+  const subnets = [
+    {
+      id: subnetId,
+      displayName: "public-subnet",
+      vcnId,
+      cidrBlock: "10.0.1.0/24",
+      lifecycleState: "AVAILABLE",
+      prohibitPublicIpOnVnic: false,
+      compartmentId: rootCompartmentId,
+    },
+  ];
+  const bootVolumes = {
+    [ocid("bootvolume", "us-ashburn-1", "aaaaaaaabootvolume00000000000000000000000000001")]:
+      {
+        id: ocid(
+          "bootvolume",
+          "us-ashburn-1",
+          "aaaaaaaabootvolume00000000000000000000000000001",
+        ),
+        displayName: "oracle-edge-boot",
+        sizeInGBs: 50,
+        lifecycleState: "ATTACHED",
+        availabilityDomain: instances[0].availabilityDomain,
+        compartmentId: instances[0].compartmentId,
+        instanceId: instances[0].id,
+      },
+    [ocid("bootvolume", "us-ashburn-1", "aaaaaaaabootvolume00000000000000000000000000002")]:
+      {
+        id: ocid(
+          "bootvolume",
+          "us-ashburn-1",
+          "aaaaaaaabootvolume00000000000000000000000000002",
+        ),
+        displayName: "oracle-worker-boot",
+        sizeInGBs: 50,
+        lifecycleState: "ATTACHED",
+        availabilityDomain: instances[1].availabilityDomain,
+        compartmentId: instances[1].compartmentId,
+        instanceId: instances[1].id,
+      },
+  };
+  const bootVolumeAttachments = Object.values(bootVolumes).map((volume) => ({
+    id: ocid(
+      "bootvolumeattachment",
+      "us-ashburn-1",
+      `${volume.id.slice(-46)}-attachment`,
+    ),
+    instanceId: volume.instanceId,
+    bootVolumeId: volume.id,
+    lifecycleState: "ATTACHED",
+    availabilityDomain: volume.availabilityDomain,
+    compartmentId: volume.compartmentId,
+  }));
+  const backups = [
+    {
+      id: ocid(
+        "bootvolumebackup",
+        "us-ashburn-1",
+        "aaaaaaaabootbackup000000000000000000000000000001",
+      ),
+      bootVolumeId: bootVolumes[
+        ocid(
+          "bootvolume",
+          "us-ashburn-1",
+          "aaaaaaaabootvolume00000000000000000000000000001",
+        )
+      ].id,
+      displayName: "oracle-edge-manual",
+      lifecycleState: "AVAILABLE",
+      type: "INCREMENTAL",
+      sizeInGBs: 50,
+      uniqueSizeInGBs: 8,
+      timeCreated: "2026-11-01T03:00:00.000Z",
+      expirationTime: null,
+    },
+  ];
+  const consoleConnections = [
+    {
+      id: ocid(
+        "instanceconsoleconnection",
+        "us-ashburn-1",
+        "aaaaaaaaconsoleconnection00000000000000000000001",
+      ),
+      instanceId: instances[0].id,
+      lifecycleState: "ACTIVE",
+      connectionString:
+        "ssh -o ProxyCommand='ssh -W %h:%p -p 443 ocid1.instanceconsoleconnection.oc1.us-ashburn-1.example' -i <private_key_file> <serial_console_host>",
+      vncConnectionString:
+        "ssh -o ProxyCommand='ssh -W %h:%p -p 443 ocid1.instanceconsoleconnection.oc1.us-ashburn-1.example' -i <private_key_file> <vnc_console_host>",
+      fingerprint: "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
+      serviceHostKeyFingerprint: "SHA256:mock-console-host-key",
+      timeCreated: "2026-11-02T04:00:00.000Z",
+    },
+  ];
+  const consoleHistories = [
+    {
+      id: ocid(
+        "instanceconsolehistory",
+        "us-ashburn-1",
+        "aaaaaaaaconsolehistory000000000000000000000001",
+      ),
+      instanceId: instances[0].id,
+      displayName: "oracle-edge-boot-log",
+      lifecycleState: "AVAILABLE",
+      timeCreated: "2026-11-02T04:10:00.000Z",
+    },
+  ];
+  const consoleHistoryData = [
+    "Oracle Linux Server boot log",
+    "Loading Linux kernel...",
+    "Started serial console login service.",
+    "oracle-edge login:",
+  ].join("\n");
+  const created = [];
   const requests = [];
   let invalidSignatures = 0;
+  let bootBackupSequence = backups.length;
+  let consoleConnectionSequence = consoleConnections.length;
+  let consoleHistorySequence = consoleHistories.length;
+  let createSequence = 0;
 
   const server = http.createServer(async (request, response) => {
     const chunks = [];
@@ -127,7 +358,8 @@ export async function createMockOracle() {
         Buffer.from(authorization.signature || "", "base64"),
       );
     const bodyHashValid =
-      request.method !== "POST" ||
+      !["POST", "PUT", "PATCH"].includes(request.method) ||
+      !request.headers["x-content-sha256"] ||
       request.headers["x-content-sha256"] ===
         createHash("sha256").update(body).digest("base64");
 
@@ -168,6 +400,391 @@ export async function createMockOracle() {
     }
 
     if (
+      request.method === "POST" &&
+      url.pathname === "/20180401/metrics/actions/summarizeMetricsData"
+    ) {
+      const query = parseJson(body);
+      const queryText = String(query.query || "");
+      const namespace = String(query.namespace || "oci_computeagent");
+      const metricName = [
+        "CpuUtilization",
+        "MemoryUtilization",
+        "LoadAverage",
+        "NetworksBytesIn",
+        "NetworksBytesOut",
+        "DiskBytesRead",
+        "DiskBytesWritten",
+      ].find((name) => queryText.includes(name));
+      if (!metricName) {
+        json(response, 200, []);
+        return;
+      }
+      const metricValues = {
+        CpuUtilization: 12,
+        MemoryUtilization: 40,
+        LoadAverage: 1.4,
+        NetworksBytesIn: 1_100_000,
+        NetworksBytesOut: 780_000,
+        DiskBytesRead: 48_000,
+        DiskBytesWritten: 32_000,
+      };
+      const startTime = new Date(query.startTime || Date.now());
+      const endTime = new Date(query.endTime || Date.now());
+      const span = Math.max(endTime.getTime() - startTime.getTime(), 1);
+      const points = Array.from({ length: 12 }, (_, index) => ({
+        timestamp: new Date(
+          startTime.getTime() + (span * index) / 11,
+        ).toISOString(),
+        value: metricValues[metricName] + index * (metricName === "CpuUtilization" ? 2.5 : 1),
+      }));
+      json(response, 200, [
+        {
+          namespace,
+          compartmentId: url.searchParams.get("compartmentId"),
+          name: metricName,
+          dimensions: {
+            resourceId:
+              queryText.match(/resourceId\s*=\s*"([^"]+)"/)?.[1] || "",
+          },
+          resolution: query.resolution || "5m",
+          aggregatedDatapoints: points,
+        },
+      ]);
+      return;
+    }
+
+    if (
+      request.method === "GET" &&
+      url.pathname === "/20160918/availabilityDomains"
+    ) {
+      json(response, 200, availabilityDomains);
+      return;
+    }
+
+    if (
+      request.method === "GET" &&
+      url.pathname === "/20160918/shapes"
+    ) {
+      json(response, 200, shapes);
+      return;
+    }
+
+    if (
+      request.method === "GET" &&
+      url.pathname === "/20160918/images"
+    ) {
+      const compartmentId = url.searchParams.get("compartmentId");
+      json(
+        response,
+        200,
+        images.filter(
+          (image) =>
+            !compartmentId || image.compartmentId === compartmentId,
+        ),
+      );
+      return;
+    }
+
+    if (
+      request.method === "GET" &&
+      url.pathname === "/20160918/vcns"
+    ) {
+      json(response, 200, vcns);
+      return;
+    }
+
+    if (
+      request.method === "GET" &&
+      url.pathname === "/20160918/subnets"
+    ) {
+      json(
+        response,
+        200,
+        subnets.filter(
+          (subnet) => subnet.compartmentId === url.searchParams.get("compartmentId"),
+        ),
+      );
+      return;
+    }
+
+    if (
+      request.method === "GET" &&
+      url.pathname === "/20160918/bootVolumeAttachments"
+    ) {
+      const instanceId = url.searchParams.get("instanceId");
+      const compartmentId = url.searchParams.get("compartmentId");
+      json(
+        response,
+        200,
+        bootVolumeAttachments.filter(
+          (attachment) =>
+            (!instanceId || attachment.instanceId === instanceId) &&
+            (!compartmentId || attachment.compartmentId === compartmentId),
+        ),
+      );
+      return;
+    }
+
+    if (
+      request.method === "GET" &&
+      url.pathname === "/20160918/bootVolumeBackups"
+    ) {
+      const bootVolumeId = url.searchParams.get("bootVolumeId");
+      json(
+        response,
+        200,
+        backups.filter(
+          (backup) => !bootVolumeId || backup.bootVolumeId === bootVolumeId,
+        ),
+      );
+      return;
+    }
+
+    if (
+      request.method === "POST" &&
+      url.pathname === "/20160918/bootVolumeBackups"
+    ) {
+      const input = parseJson(body);
+      const volume = bootVolumes[input.bootVolumeId];
+      if (!volume) {
+        json(response, 404, {
+          code: "NotAuthorizedOrNotFound",
+          message: "The boot volume was not found.",
+        });
+        return;
+      }
+      bootBackupSequence += 1;
+      const backup = {
+        id: ocid(
+          "bootvolumebackup",
+          "us-ashburn-1",
+          `aaaaaaaabootbackup0000000000000000000000000000${bootBackupSequence}`,
+        ),
+        bootVolumeId: volume.id,
+        displayName: input.displayName || `manual-backup-${bootBackupSequence}`,
+        lifecycleState: "CREATING",
+        type: input.type === "FULL" ? "FULL" : "INCREMENTAL",
+        sizeInGBs: volume.sizeInGBs,
+        uniqueSizeInGBs: 0,
+        timeCreated: new Date().toISOString(),
+        expirationTime: null,
+      };
+      backups.push(backup);
+      json(response, 200, backup);
+      return;
+    }
+
+    const bootVolumeBackupMatch = url.pathname.match(
+      /^\/20160918\/bootVolumeBackups\/([^/]+)$/,
+    );
+    if (bootVolumeBackupMatch) {
+      const backupId = decodeURIComponent(bootVolumeBackupMatch[1]);
+      const index = backups.findIndex((backup) => backup.id === backupId);
+      if (request.method === "GET") {
+        if (index < 0) {
+          json(response, 404, {
+            code: "NotAuthorizedOrNotFound",
+            message: "The boot volume backup was not found.",
+          });
+          return;
+        }
+        json(response, 200, backups[index]);
+        return;
+      }
+      if (request.method === "DELETE") {
+        if (index < 0) {
+          json(response, 404, {
+            code: "NotAuthorizedOrNotFound",
+            message: "The boot volume backup was not found.",
+          });
+          return;
+        }
+        backups.splice(index, 1);
+        empty(response, 204);
+        return;
+      }
+    }
+
+    const bootVolumeMatch = url.pathname.match(
+      /^\/20160918\/bootVolumes\/([^/]+)$/,
+    );
+    if (bootVolumeMatch && request.method === "GET") {
+      const volume = bootVolumes[decodeURIComponent(bootVolumeMatch[1])];
+      if (!volume) {
+        json(response, 404, {
+          code: "NotAuthorizedOrNotFound",
+          message: "The boot volume was not found.",
+        });
+        return;
+      }
+      json(response, 200, volume);
+      return;
+    }
+
+    if (
+      url.pathname === "/20160918/instanceConsoleConnections" &&
+      ["GET", "POST"].includes(request.method)
+    ) {
+      if (request.method === "POST") {
+        const input = parseJson(body);
+        consoleConnectionSequence += 1;
+        const connection = {
+          id: ocid(
+            "instanceconsoleconnection",
+            "us-ashburn-1",
+            `aaaaaaaaconsoleconnection0000000000000000000000${consoleConnectionSequence}`,
+          ),
+          instanceId: input.instanceId,
+          lifecycleState: "ACTIVE",
+          connectionString:
+            "ssh -o ProxyCommand='ssh -W %h:%p -p 443 ocid1.instanceconsoleconnection.oc1.us-ashburn-1.example' -i <private_key_file> <serial_console_host>",
+          vncConnectionString:
+            "ssh -o ProxyCommand='ssh -W %h:%p -p 443 ocid1.instanceconsoleconnection.oc1.us-ashburn-1.example' -i <private_key_file> <vnc_console_host>",
+          fingerprint: fingerprintFor(publicKey),
+          serviceHostKeyFingerprint: "SHA256:mock-console-host-key",
+          publicKey: input.publicKey,
+          timeCreated: new Date().toISOString(),
+        };
+        consoleConnections.push(connection);
+        json(response, 200, connection);
+        return;
+      }
+      const instanceId = url.searchParams.get("instanceId");
+      json(
+        response,
+        200,
+        consoleConnections.filter(
+          (connection) => !instanceId || connection.instanceId === instanceId,
+        ),
+      );
+      return;
+    }
+
+    const consoleConnectionMatch = url.pathname.match(
+      /^\/20160918\/instanceConsoleConnections\/([^/]+)$/,
+    );
+    if (consoleConnectionMatch) {
+      const connectionId = decodeURIComponent(consoleConnectionMatch[1]);
+      const index = consoleConnections.findIndex(
+        (connection) => connection.id === connectionId,
+      );
+      if (request.method === "GET") {
+        if (index < 0) {
+          json(response, 404, {
+            code: "NotAuthorizedOrNotFound",
+            message: "The console connection was not found.",
+          });
+          return;
+        }
+        json(response, 200, consoleConnections[index]);
+        return;
+      }
+      if (request.method === "DELETE") {
+        if (index < 0) {
+          json(response, 404, {
+            code: "NotAuthorizedOrNotFound",
+            message: "The console connection was not found.",
+          });
+          return;
+        }
+        consoleConnections.splice(index, 1);
+        empty(response, 204);
+        return;
+      }
+    }
+
+    if (
+      url.pathname === "/20160918/instanceConsoleHistories" &&
+      ["GET", "POST"].includes(request.method)
+    ) {
+      if (request.method === "POST") {
+        const input = parseJson(body);
+        consoleHistorySequence += 1;
+        const history = {
+          id: ocid(
+            "instanceconsolehistory",
+            "us-ashburn-1",
+            `aaaaaaaaconsolehistory0000000000000000000000${consoleHistorySequence}`,
+          ),
+          instanceId: input.instanceId,
+          displayName: input.displayName || `console-history-${consoleHistorySequence}`,
+          lifecycleState: "AVAILABLE",
+          timeCreated: new Date().toISOString(),
+        };
+        consoleHistories.push(history);
+        json(response, 200, history);
+        return;
+      }
+      const instanceId = url.searchParams.get("instanceId");
+      json(
+        response,
+        200,
+        consoleHistories.filter(
+          (history) => !instanceId || history.instanceId === instanceId,
+        ),
+      );
+      return;
+    }
+
+    const consoleHistoryDataMatch = url.pathname.match(
+      /^\/20160918\/instanceConsoleHistories\/([^/]+)\/data$/,
+    );
+    if (consoleHistoryDataMatch && request.method === "GET") {
+      const historyId = decodeURIComponent(consoleHistoryDataMatch[1]);
+      if (!consoleHistories.some((history) => history.id === historyId)) {
+        json(response, 404, {
+          code: "NotAuthorizedOrNotFound",
+          message: "The console history was not found.",
+        });
+        return;
+      }
+      const offset = Math.max(0, Number(url.searchParams.get("offset")) || 0);
+      const length = Math.max(
+        0,
+        Number(url.searchParams.get("length")) || consoleHistoryData.length,
+      );
+      text(
+        response,
+        200,
+        consoleHistoryData.slice(offset, offset + length),
+      );
+      return;
+    }
+
+    const consoleHistoryMatch = url.pathname.match(
+      /^\/20160918\/instanceConsoleHistories\/([^/]+)$/,
+    );
+    if (consoleHistoryMatch) {
+      const historyId = decodeURIComponent(consoleHistoryMatch[1]);
+      const index = consoleHistories.findIndex(
+        (history) => history.id === historyId,
+      );
+      if (request.method === "GET") {
+        if (index < 0) {
+          json(response, 404, {
+            code: "NotAuthorizedOrNotFound",
+            message: "The console history was not found.",
+          });
+          return;
+        }
+        json(response, 200, consoleHistories[index]);
+        return;
+      }
+      if (request.method === "DELETE") {
+        if (index < 0) {
+          json(response, 404, {
+            code: "NotAuthorizedOrNotFound",
+            message: "The console history was not found.",
+          });
+          return;
+        }
+        consoleHistories.splice(index, 1);
+        empty(response, 204);
+        return;
+      }
+    }
+
+    if (
       request.method === "GET" &&
       url.pathname === "/20160918/instances"
     ) {
@@ -179,6 +796,37 @@ export async function createMockOracle() {
           (instance) => instance.compartmentId === compartmentId,
         ),
       );
+      return;
+    }
+
+    if (
+      request.method === "POST" &&
+      url.pathname === "/20160918/instances"
+    ) {
+      const input = parseJson(body);
+      createSequence += 1;
+      const instance = {
+        ...input,
+        id: ocid(
+          "instance",
+          "us-ashburn-1",
+          `aaaaaaaainstance0000000000000000000000000000000${createSequence}`,
+        ),
+        region: "us-ashburn-1",
+        lifecycleState: "PROVISIONING",
+        timeCreated: new Date().toISOString(),
+        freeformTags: {},
+        shapeConfig: input.shapeConfig || {
+          ocpus: 1,
+          memoryInGBs: 1,
+        },
+        sourceDetails: input.sourceDetails || {
+          imageId: input.imageId,
+        },
+      };
+      instances.push(instance);
+      created.push(instance);
+      json(response, 200, instance);
       return;
     }
 
@@ -224,6 +872,21 @@ export async function createMockOracle() {
         return;
       }
       json(response, 200, instance);
+      return;
+    }
+
+    if (actionMatch && request.method === "DELETE") {
+      const instanceId = decodeURIComponent(actionMatch[1]);
+      const index = instances.findIndex((entry) => entry.id === instanceId);
+      if (index < 0) {
+        json(response, 404, {
+          code: "NotAuthorizedOrNotFound",
+          message: "The instance was not found.",
+        });
+        return;
+      }
+      instances.splice(index, 1);
+      empty(response, 204);
       return;
     }
 
@@ -279,12 +942,32 @@ export async function createMockOracle() {
     privateKey,
     publicKey,
     instances,
+    created,
+    backups,
+    bootVolumes,
+    bootVolumeAttachments,
+    consoleConnections,
+    consoleHistories,
+    consoleHistoryData,
+    availabilityDomains,
+    shapes,
+    images,
+    vcns,
+    subnets,
     requests,
     get invalidSignatures() {
       return invalidSignatures;
     },
     endpointResolver: ({ service }) => {
-      if (!["compute", "identity"].includes(service)) {
+      if (
+        ![
+          "compute",
+          "identity",
+          "monitoring",
+          "network",
+          "block-storage",
+        ].includes(service)
+      ) {
         throw new Error(`Unexpected OCI service: ${service}`);
       }
       return `http://127.0.0.1:${address.port}`;

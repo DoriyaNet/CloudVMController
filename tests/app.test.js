@@ -8,18 +8,33 @@ import test from "node:test";
 import { createRequestHandler } from "../server/app.js";
 import { openSettingsStore } from "../server/settings-store.js";
 import {
+  renderCreateProviderSwitch,
   renderCreate,
   renderCreateUnavailable,
   renderDrawer,
   renderIpRenewModal,
   renderIpSwapModal,
   renderInstances,
+  renderOracleBackupDeleteModal,
+  renderOracleBackupModal,
+  renderOracleConsoleModal,
+  renderOracleCreate,
+  renderOracleTerminateModal,
   renderOverview,
   renderSettings,
 } from "../public/js/views.js";
+import {
+  OCI_REGIONS,
+  getOracleRegion,
+  oracleRegionGroups,
+} from "../public/js/oracle-regions.js";
 import { createMockLinode } from "./helpers/mock-linode.js";
 import { createMockOracle } from "./helpers/mock-oracle.js";
 import { createSocks5Server } from "./helpers/socks5-server.js";
+
+const TEST_SSH_PUBLIC_KEY = ["ssh-rsa", "AAAA", "testkey", "user@example"].join(
+  " ",
+);
 
 async function listen(server) {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -67,6 +82,21 @@ test("requires a token when no env credential is configured", async (t) => {
 
   assert.equal(response.status, 401);
   assert.equal(payload.code, "TOKEN_REQUIRED");
+});
+
+test("provides complete Chinese OCI region choices", () => {
+  assert.equal(OCI_REGIONS.length, 45);
+  assert.equal(new Set(OCI_REGIONS.map((region) => region.id)).size, 45);
+  assert.equal(
+    oracleRegionGroups().reduce(
+      (total, group) => total + group.regions.length,
+      0,
+    ),
+    45,
+  );
+  assert.equal(getOracleRegion("us-ashburn-1")?.label, "美国东部（阿什本）");
+  assert.equal(getOracleRegion("us-ashburn-1")?.country, "US");
+  assert.equal(getOracleRegion("ap-tokyo-1")?.name, "Japan East (Tokyo)");
 });
 
 test("stores multiple web-managed tokens and switches the active credential", async (t) => {
@@ -1477,6 +1507,231 @@ test("verifies Oracle signatures, stores OCI keys encrypted, and controls instan
   assert.equal(stack.oracle.invalidSignatures, 0);
 });
 
+test("supports OCI create options, monitoring, backups, console, launch, and termination", async (t) => {
+  const stack = await startStack({ envToken: "", withOracle: true });
+  t.after(() => stack.close());
+  const headers = {
+    "Content-Type": "application/json",
+    "X-CloudVMController": "1",
+  };
+  const accountResponse = await fetch(
+    `${stack.baseUrl}/api/settings/oracle-accounts`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        label: "OCI Operations",
+        tenancyId: stack.oracle.tenancyId,
+        userId: stack.oracle.userId,
+        fingerprint: stack.oracle.fingerprint,
+        region: "us-ashburn-1",
+        privateKey: stack.oracle.privateKey,
+      }),
+    },
+  );
+  const accountPayload = await accountResponse.json();
+  assert.equal(accountResponse.status, 201);
+  const accountId = accountPayload.accountId;
+  const target = stack.oracle.instances.find(
+    (instance) => instance.displayName === "oracle-edge",
+  );
+  const publicKey = TEST_SSH_PUBLIC_KEY;
+
+  const optionsResponse = await fetch(
+    `${stack.baseUrl}/api/oracle/create-options?accountId=${accountId}`,
+  );
+  const options = await optionsResponse.json();
+  assert.equal(optionsResponse.status, 200);
+  assert.ok(options.compartments.length >= 2);
+  assert.ok(
+    options.compartments.some((entry) => entry.id === stack.oracle.tenancyId),
+  );
+  assert.ok(options.availabilityDomains.length >= 2);
+  assert.ok(options.shapes.some((shape) => shape.name === "VM.Standard.A1.Flex"));
+  assert.ok(options.images.length >= 2);
+  assert.ok(options.subnets.length >= 1);
+
+  const childOptionsResponse = await fetch(
+    `${stack.baseUrl}/api/oracle/create-options?accountId=${accountId}&compartmentId=${encodeURIComponent(stack.oracle.childCompartmentId)}`,
+  );
+  const childOptions = await childOptionsResponse.json();
+  assert.equal(childOptionsResponse.status, 200);
+  assert.equal(childOptions.selectedCompartmentId, stack.oracle.childCompartmentId);
+  assert.ok(
+    childOptions.images.some(
+      (image) => image.displayName === "Custom Ubuntu 24.04",
+    ),
+  );
+  assert.ok(
+    childOptions.images.some((image) => image.displayName === "Oracle Linux 9"),
+  );
+
+  const detailResponse = await fetch(
+    `${stack.baseUrl}/api/oracle/instances/${encodeURIComponent(target.id)}/detail?accountId=${accountId}`,
+  );
+  const detail = await detailResponse.json();
+  assert.equal(detailResponse.status, 200);
+  assert.equal(detail.oracleMetrics.available, true);
+  assert.ok(
+    detail.oracleMetrics.metrics.some(
+      (metric) => metric.key === "cpu" && metric.points.length > 0,
+    ),
+  );
+  assert.equal(detail.oracleBackups.bootVolume.id, stack.oracle.bootVolumes[
+    Object.keys(stack.oracle.bootVolumes)[0]
+  ].id);
+  assert.equal(detail.oracleBackups.backups.length, 1);
+  assert.equal(detail.oracleConsole.connections.length, 1);
+  assert.equal(detail.oracleConsole.histories.length, 1);
+
+  const metricsResponse = await fetch(
+    `${stack.baseUrl}/api/oracle/instances/${encodeURIComponent(target.id)}/metrics?accountId=${accountId}&window=1h`,
+  );
+  const metrics = await metricsResponse.json();
+  assert.equal(metricsResponse.status, 200);
+  assert.equal(metrics.available, true);
+  assert.equal(metrics.window, "1h");
+
+  const backupResponse = await fetch(
+    `${stack.baseUrl}/api/oracle/instances/${encodeURIComponent(target.id)}/backups?accountId=${accountId}`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        displayName: "oracle-edge-integration-backup",
+        type: "FULL",
+      }),
+    },
+  );
+  const backupPayload = await backupResponse.json();
+  assert.equal(backupResponse.status, 201);
+  assert.equal(backupPayload.backup.displayName, "oracle-edge-integration-backup");
+  assert.equal(backupPayload.backup.type, "FULL");
+  assert.equal(stack.oracle.backups.length, 2);
+
+  const deleteBackupResponse = await fetch(
+    `${stack.baseUrl}/api/oracle/instances/${encodeURIComponent(target.id)}/backups/${encodeURIComponent(backupPayload.backup.id)}?accountId=${accountId}`,
+    { method: "DELETE", headers: { "X-CloudVMController": "1" } },
+  );
+  assert.equal(deleteBackupResponse.status, 200);
+  assert.equal(stack.oracle.backups.length, 1);
+
+  const consoleResponse = await fetch(
+    `${stack.baseUrl}/api/oracle/instances/${encodeURIComponent(target.id)}/console?accountId=${accountId}`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ publicKey }),
+    },
+  );
+  const consolePayload = await consoleResponse.json();
+  assert.equal(consoleResponse.status, 201);
+  assert.match(consolePayload.connection.connectionString, /ssh/);
+  assert.equal(stack.oracle.consoleConnections.length, 2);
+
+  const disconnectResponse = await fetch(
+    `${stack.baseUrl}/api/oracle/instances/${encodeURIComponent(target.id)}/console/connections/${encodeURIComponent(consolePayload.connection.id)}?accountId=${accountId}`,
+    { method: "DELETE", headers: { "X-CloudVMController": "1" } },
+  );
+  assert.equal(disconnectResponse.status, 200);
+  assert.equal(stack.oracle.consoleConnections.length, 1);
+
+  const historyResponse = await fetch(
+    `${stack.baseUrl}/api/oracle/instances/${encodeURIComponent(target.id)}/console/histories?accountId=${accountId}`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ displayName: "oracle-edge-console-log" }),
+    },
+  );
+  const historyPayload = await historyResponse.json();
+  assert.equal(historyResponse.status, 201);
+  const historyDataResponse = await fetch(
+    `${stack.baseUrl}/api/oracle/instances/${encodeURIComponent(target.id)}/console/histories/${encodeURIComponent(historyPayload.history.id)}/data?accountId=${accountId}`,
+  );
+  const historyData = await historyDataResponse.json();
+  assert.equal(historyDataResponse.status, 200);
+  assert.match(historyData.text, /serial console login service/);
+
+  const deleteHistoryResponse = await fetch(
+    `${stack.baseUrl}/api/oracle/instances/${encodeURIComponent(target.id)}/console/histories/${encodeURIComponent(historyPayload.history.id)}?accountId=${accountId}`,
+    { method: "DELETE", headers: { "X-CloudVMController": "1" } },
+  );
+  assert.equal(deleteHistoryResponse.status, 200);
+  assert.equal(stack.oracle.consoleHistories.length, 1);
+
+  const launchResponse = await fetch(`${stack.baseUrl}/api/oracle/instances`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      accountId,
+      compartmentId: stack.oracle.tenancyId,
+      availabilityDomain: stack.oracle.availabilityDomains[0].name,
+      displayName: "oracle-launched",
+      shape: "VM.Standard.A1.Flex",
+      ocpus: 1,
+      memoryInGBs: 6,
+      imageId: stack.oracle.images[0].id,
+      subnetId: stack.oracle.subnets[0].id,
+      assignPublicIp: true,
+      sshAuthorizedKeys: [publicKey],
+      userData: "#cloud-config\npackage_update: true",
+    }),
+  });
+  const launchPayload = await launchResponse.json();
+  assert.equal(launchResponse.status, 202);
+  assert.equal(launchPayload.instance.label, "oracle-launched");
+  assert.equal(stack.oracle.created.length, 1);
+  assert.equal(
+    stack.oracle.created[0].sourceDetails.imageId,
+    stack.oracle.images[0].id,
+  );
+  assert.equal(
+    stack.oracle.created[0].createVnicDetails.subnetId,
+    stack.oracle.subnets[0].id,
+  );
+  assert.match(
+    stack.oracle.created[0].metadata.ssh_authorized_keys,
+    /^ssh-rsa /,
+  );
+  assert.ok(stack.oracle.created[0].metadata.user_data);
+
+  const wrongTerminate = await fetch(
+    `${stack.baseUrl}/api/oracle/instances/${encodeURIComponent(target.id)}?accountId=${accountId}`,
+    {
+      method: "DELETE",
+      headers,
+      body: JSON.stringify({
+        confirmation: "wrong-name",
+        preserveBootVolume: true,
+      }),
+    },
+  );
+  assert.equal(wrongTerminate.status, 400);
+
+  const terminateResponse = await fetch(
+    `${stack.baseUrl}/api/oracle/instances/${encodeURIComponent(target.id)}?accountId=${accountId}`,
+    {
+      method: "DELETE",
+      headers,
+      body: JSON.stringify({
+        confirmation: "oracle-edge",
+        preserveBootVolume: true,
+        preserveDataVolumes: false,
+      }),
+    },
+  );
+  const terminated = await terminateResponse.json();
+  assert.equal(terminateResponse.status, 202);
+  assert.equal(terminated.preserveBootVolume, true);
+  assert.equal(
+    stack.oracle.instances.some((instance) => instance.id === target.id),
+    false,
+  );
+  assert.ok(stack.oracle.requests.every((entry) => entry.signatureValid));
+  assert.equal(stack.oracle.invalidSignatures, 0);
+});
+
 test("rejects invalid Oracle credentials before storing them", async (t) => {
   const stack = await startStack({ envToken: "", withOracle: true });
   t.after(() => stack.close());
@@ -1669,15 +1924,19 @@ test("renders Oracle instances, details, settings, and deployment boundary", () 
   assert.match(list, /provider-oracle/);
   assert.match(list, /data-provider="oracle"/);
   assert.match(list, /2 OCPU/);
+  assert.match(list, /美国东部（阿什本）/);
+  assert.match(list, /部署实例/);
   assert.doesNotMatch(list, /部署 Linode/);
 
   const overview = renderOverview(baseState);
   assert.match(overview, /OCI Production/);
   assert.match(overview, /Oracle Cloud/);
+  assert.match(overview, /美国东部（阿什本）/);
   assert.match(overview, /OCI 费用请在 Oracle 控制台查看/);
 
   const drawer = renderDrawer(baseState);
   assert.match(drawer, /ORACLE CLOUD INSTANCE/);
+  assert.match(drawer, /美国东部（阿什本）/);
   assert.match(drawer, /129\.146\.88\.42/);
   assert.match(drawer, /Uocm:US-ASHBURN-AD-1/);
   assert.match(drawer, /2 OCPU/);
@@ -1689,9 +1948,275 @@ test("renders Oracle instances, details, settings, and deployment boundary", () 
   assert.match(settings, /Oracle Cloud 账户/);
   assert.match(settings, /添加 OCI 账户/);
   assert.match(settings, /OCI Production/);
+  assert.match(settings, /美国东部（阿什本）/);
   assert.doesNotMatch(settings, /BEGIN PRIVATE KEY/);
 
   const createUnavailable = renderCreateUnavailable(baseState);
-  assert.match(createUnavailable, /Oracle 实例创建尚未开放/);
-  assert.match(createUnavailable, /自动出现在这里/);
+  assert.match(createUnavailable, /还没有可部署的云账户/);
+  assert.match(createUnavailable, /添加 OCI 账户/);
+});
+
+test("renders OCI provisioning, monitoring, backup, console, and termination controls", () => {
+  const account = {
+    id: ["oci", "account", "2"].join("-"),
+    label: "OCI Tokyo",
+    region: "ap-tokyo-1",
+    tenancyId:
+      "ocid1.tenancy.oc1..aaaaaaaaoracletesttenant0000000000000000000000000000000001",
+    compartmentId: "",
+  };
+  const instance = {
+    id: "ocid1.instance.oc1.us-ashburn-1.anuwgljroracletest0000000000000000000002",
+    provider: "oracle",
+    label: "oci-ops-test",
+    status: "running",
+    providerStatus: "RUNNING",
+    region: "ap-tokyo-1",
+    availabilityDomain: "Uocm:US-ASHBURN-AD-1",
+    compartmentId:
+      "ocid1.compartment.oc1..aaaaaaaarootcompartment00000000000000000000000000001",
+    type: "VM.Standard.A1.Flex",
+    specs: { ocpus: 1, memory: 6144 },
+    tags: [],
+    accountId: account.id,
+    tokenId: account.id,
+    accountLabel: account.label,
+  };
+  const createState = {
+    settings: {
+      tokenConfigured: true,
+      oracleConfigured: true,
+      oracleAccounts: [account],
+    },
+    session: { tokenConfigured: true },
+    create: {
+      provider: "oracle",
+      advancedOpen: false,
+      label: "oci-new",
+    },
+    oracleCreate: {
+      accountId: account.id,
+      label: "oci-new",
+      compartmentId: account.tenancyId,
+      availabilityDomain: "Uocm:US-ASHBURN-AD-1",
+      shape: "VM.Standard.A1.Flex",
+      ocpus: "2",
+      memoryInGBs: "8",
+      imageId:
+        "ocid1.image.oc1.us-ashburn-1.aaaaaaaaimage0000000000000000000000000000001",
+      vcnId:
+        "ocid1.vcn.oc1.us-ashburn-1.aaaaaaaavcn0000000000000000000000000000001",
+      subnetId:
+        "ocid1.subnet.oc1.us-ashburn-1.aaaaaaaasubnet00000000000000000000000000001",
+      assignPublicIp: true,
+      sshKeys: TEST_SSH_PUBLIC_KEY,
+      userData: "",
+      options: {
+        loading: false,
+        error: "",
+        resourcesKey: "ready",
+        account,
+        compartments: [{ id: account.tenancyId, name: "Tenancy 根 Compartment" }],
+        availabilityDomains: [{ name: "Uocm:US-ASHBURN-AD-1" }],
+        shapes: [
+          {
+            name: "VM.Standard.A1.Flex",
+            isFlexible: true,
+            ocpuMin: 1,
+            ocpuMax: 4,
+            memoryMinInGBs: 6,
+            memoryMaxInGBs: 24,
+          },
+        ],
+        images: [
+          {
+            id: "ocid1.image.oc1.us-ashburn-1.aaaaaaaaimage0000000000000000000000000000001",
+            displayName: "Oracle Linux 9",
+            operatingSystemVersion: "9",
+          },
+        ],
+        vcns: [
+          {
+            id: "ocid1.vcn.oc1.us-ashburn-1.aaaaaaaavcn0000000000000000000000000000001",
+            displayName: "oci-vcn",
+            cidrBlock: "10.0.0.0/16",
+          },
+        ],
+        subnets: [
+          {
+            id: "ocid1.subnet.oc1.us-ashburn-1.aaaaaaaasubnet00000000000000000000000000001",
+            displayName: "public-subnet",
+            vcnId:
+              "ocid1.vcn.oc1.us-ashburn-1.aaaaaaaavcn0000000000000000000000000000001",
+            cidrBlock: "10.0.1.0/24",
+            prohibitPublicIpOnVnic: false,
+          },
+        ],
+        empty: [],
+        warnings: [],
+      },
+    },
+    oracleCreating: false,
+    oracleCreateError: "",
+  };
+  const switchHtml = renderCreateProviderSwitch(createState);
+  assert.match(switchHtml, /data-provider="linode"/);
+  assert.match(switchHtml, /data-provider="oracle"/);
+  assert.match(switchHtml, /is-active/);
+
+  const createHtml = renderOracleCreate(createState);
+  assert.match(createHtml, /创建 OCI 实例/);
+  assert.match(createHtml, /oracle-create-account/);
+  assert.match(createHtml, /oracle-create-subnet/);
+  assert.match(createHtml, /VM\.Standard\.A1\.Flex/);
+  assert.match(createHtml, /ssh_authorized_keys/);
+  assert.match(createHtml, /按实际用量/);
+
+  const detailState = {
+    ...createState,
+    overview: null,
+    busyActions: new Set(),
+    detail: {
+      open: true,
+      id: instance.id,
+      tokenId: account.id,
+      provider: "oracle",
+      loading: false,
+      error: null,
+      oracleMetricsWindow: "24h",
+      oracleMetricsLoading: false,
+      oracleOpsBusy: "",
+      data: {
+        provider: "oracle",
+        instance,
+        ips: { publicIpv4s: ["129.146.88.42"], privateIpv4s: [], ipv6s: [] },
+        oracleMetrics: {
+          available: true,
+          window: "24h",
+          resolution: "5m",
+          startTime: "2026-11-07T00:00:00.000Z",
+          metrics: [
+            {
+              key: "cpu",
+              label: "CPU 使用率",
+              unit: "percent",
+              points: [
+                [1_762_000_000_000, 12],
+                [1_762_000_300_000, 18],
+              ],
+            },
+            {
+              key: "memory",
+              label: "内存使用率",
+              unit: "percent",
+              points: [[1_762_000_300_000, 40]],
+            },
+            {
+              key: "networkIn",
+              label: "网络入站",
+              unit: "bytesPerSecond",
+              points: [[1_762_000_300_000, 1024]],
+            },
+          ],
+          errors: [],
+        },
+        oracleBackups: {
+          bootVolume: { id: "boot", displayName: "oci-ops-test-boot", sizeInGBs: 50 },
+          backups: [
+            {
+              id: "ocid1.bootvolumebackup.oc1.us-ashburn-1.aaaaaaaabackup000000000000000000000001",
+              displayName: "oci-ops-backup",
+              lifecycleState: "AVAILABLE",
+              type: "INCREMENTAL",
+              sizeInGBs: 50,
+              timeCreated: "2026-11-07T00:00:00.000Z",
+            },
+          ],
+          emptyReason: "",
+        },
+        oracleConsole: {
+          connections: [
+            {
+              id: "ocid1.instanceconsoleconnection.oc1.us-ashburn-1.aaaaaaaaconnection000000000000000001",
+              lifecycleState: "ACTIVE",
+              connectionString: "ssh -W %h:%p console.example",
+              fingerprint: "aa:bb",
+              serviceHostKeyFingerprint: "SHA256:test",
+            },
+          ],
+          histories: [
+            {
+              id: "ocid1.instanceconsolehistory.oc1.us-ashburn-1.aaaaaaaahistory0000000000000000000001",
+              displayName: "boot log",
+              lifecycleState: "AVAILABLE",
+              timeCreated: "2026-11-07T00:00:00.000Z",
+            },
+          ],
+          publicKeyHint: "",
+        },
+      },
+    },
+  };
+  const drawer = renderDrawer(detailState);
+  assert.match(drawer, /OCI 监控/);
+  assert.match(drawer, /启动卷备份/);
+  assert.match(drawer, /串口控制台/);
+  assert.match(drawer, /终止实例/);
+  assert.match(drawer, /oci-ops-backup/);
+  assert.match(drawer, /serviceHostKeyFingerprint|SHA256:test/);
+  assert.doesNotMatch(
+    drawer,
+    /<div class="chart-axis"><span>—<\/span>/,
+  );
+
+  const backupModal = renderOracleBackupModal({
+    modal: {
+      type: "oracle-backup",
+      instance,
+      displayName: "backup-test",
+      backupType: "INCREMENTAL",
+      busy: false,
+      error: "",
+    },
+  });
+  assert.match(backupModal, /创建启动卷备份/);
+  assert.match(backupModal, /oracle-backup-form/);
+
+  const backupDeleteModal = renderOracleBackupDeleteModal({
+    modal: {
+      type: "oracle-backup-delete",
+      backup: { id: "backup", displayName: "backup-test" },
+      confirmed: true,
+      busy: false,
+      error: "",
+    },
+  });
+  assert.match(backupDeleteModal, /删除启动卷备份/);
+
+  const consoleModal = renderOracleConsoleModal({
+    modal: {
+      type: "oracle-console",
+      instance,
+      publicKey: "",
+      busy: false,
+      error: "",
+    },
+  });
+  assert.match(consoleModal, /创建 OCI 串口连接/);
+  assert.match(consoleModal, /RSA 公钥/);
+
+  const terminateModal = renderOracleTerminateModal({
+    modal: {
+      type: "oracle-terminate",
+      instance,
+      confirmation: "oci-ops-test",
+      preserveBootVolume: true,
+      preserveDataVolumes: true,
+      busy: false,
+      error: "",
+    },
+  });
+  assert.match(terminateModal, /终止 OCI 实例/);
+  assert.match(terminateModal, /保留启动卷/);
+  assert.match(terminateModal, /保留随实例创建的数据卷/);
 });
