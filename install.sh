@@ -348,10 +348,13 @@ NPM_BIN=""
 
 resolve_node_runtime() {
     NODE_BIN="$(find_local_node || find_system_node || true)"
-    if [[ -z "$NODE_BIN" ]]; then
-        NODE_BIN="$(install_portable_node)"
+    if [[ -n "$NODE_BIN" ]]; then
+        NPM_BIN="$(find_npm_for_node "$NODE_BIN" || true)"
     fi
-    NPM_BIN="$(find_npm_for_node "$NODE_BIN" || true)"
+    if [[ -z "$NODE_BIN" || -z "$NPM_BIN" ]]; then
+        NODE_BIN="$(install_portable_node)"
+        NPM_BIN="$(find_npm_for_node "$NODE_BIN" || true)"
+    fi
     [[ -n "$NPM_BIN" ]] || die "找不到 npm，请安装完整版 Node.js 20+ 后重试"
 }
 
