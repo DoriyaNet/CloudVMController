@@ -151,13 +151,12 @@ function Get-LocalNode {
     if (-not (Test-Path -LiteralPath $RuntimeDir)) {
         return $null
     }
-    $node = Get-ChildItem -LiteralPath $RuntimeDir -Filter node.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $node) {
-        return $null
-    }
-    $version = Get-NodeVersion -NodePath $node.FullName
-    if ($version -and $version -ge [version]"20.0.0") {
-        return $node.FullName
+    $nodes = Get-ChildItem -LiteralPath $RuntimeDir -Filter node.exe -Recurse -ErrorAction SilentlyContinue
+    foreach ($node in $nodes) {
+        $version = Get-NodeVersion -NodePath $node.FullName
+        if ($version -and $version -ge [version]"20.0.0") {
+            return $node.FullName
+        }
     }
     return $null
 }

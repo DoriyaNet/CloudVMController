@@ -211,8 +211,8 @@ function Get-NodePath {
     }
     $runtimeDir = Join-Path (Get-CloudVmHome) "runtime"
     if (Test-Path -LiteralPath $runtimeDir) {
-        $localNode = Get-ChildItem -LiteralPath $runtimeDir -Filter node.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($localNode) {
+        $localNodes = Get-ChildItem -LiteralPath $runtimeDir -Filter node.exe -Recurse -ErrorAction SilentlyContinue
+        foreach ($localNode in $localNodes) {
             $candidates += $localNode.FullName
         }
     }
