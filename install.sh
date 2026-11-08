@@ -99,9 +99,11 @@ done
 [[ -n "${HOME:-}" ]] || die "HOME 未设置"
 
 SOURCE="${BASH_SOURCE[0]:-}"
+PIPED_INSTALL=0
 if [[ -n "$SOURCE" && "$SOURCE" != "/dev/stdin" && "$SOURCE" != /dev/fd/* && -f "$SOURCE" ]]; then
     SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd -P)"
 else
+    PIPED_INSTALL=1
     SCRIPT_DIR="$(pwd -P)"
 fi
 
@@ -455,7 +457,7 @@ write_config() {
 
 if [[ -n "$INSTALL_DIR" ]]; then
     TARGET_DIR="$(resolve_target "$INSTALL_DIR")"
-elif is_local_repo "$SCRIPT_DIR"; then
+elif [[ "$PIPED_INSTALL" -eq 0 ]] && is_local_repo "$SCRIPT_DIR"; then
     TARGET_DIR="$(cd "$SCRIPT_DIR" && pwd -P)"
 else
     TARGET_DIR="$(resolve_target "$CLOUDVM_HOME/app")"
@@ -464,7 +466,7 @@ fi
 info "CloudVMController 安装程序 $INSTALLER_VERSION"
 printf '安装目录：%s\n' "$TARGET_DIR"
 
-if is_local_repo "$SCRIPT_DIR"; then
+if [[ "$PIPED_INSTALL" -eq 0 ]] && is_local_repo "$SCRIPT_DIR"; then
     if [[ "$SCRIPT_DIR" != "$TARGET_DIR" ]]; then
         info "复制本地项目文件..."
         copy_app_files "$SCRIPT_DIR" "$TARGET_DIR"
