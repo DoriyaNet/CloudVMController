@@ -483,7 +483,7 @@ function Copy-AppFiles {
         }
         Copy-Item -LiteralPath $source -Destination $target -Recurse -Force
     }
-    $files = @("install.ps1", "install.cmd", "README.md", "package.json", "package-lock.json", ".env.example", ".gitignore")
+    $files = @("install.ps1", "install.cmd", "install.sh", "README.md", "package.json", "package-lock.json", ".env.example", ".gitignore", ".gitattributes")
     foreach ($file in $files) {
         $source = Join-Path $SourceRoot $file
         if (Test-Path -LiteralPath $source) {

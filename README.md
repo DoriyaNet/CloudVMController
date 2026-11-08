@@ -6,7 +6,9 @@ CloudVMController 是一个在本地运行的多云实例控制面板，通过 A
 
 > 这是第三方本地工具，与 Akamai / Linode、Oracle 均无官方关联。
 
-## 一键安装（Windows）
+## 一键安装
+
+### Windows
 
 在仓库目录运行：
 
@@ -23,6 +25,29 @@ cloudvm update-script # 更新 cloudvm 脚本
 ```
 
 安装位置、远程一键安装和更多命令见 [Windows 一键安装](https://github.com/DoriyaNet/CloudVMController/wiki/Windows-Install)。
+
+### Linux
+
+在仓库目录运行：
+
+```bash
+bash install.sh
+```
+
+也可以直接运行远程脚本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DoriyaNet/CloudVMController/main/install.sh | bash
+```
+
+脚本会检查 Node.js 20+、安装依赖，并把 `cloudvm` 安装到 `~/.local/bin`。更新命令与 Windows 相同：
+
+```bash
+cloudvm update
+cloudvm update-script
+```
+
+安装位置、代理和更多命令见 [Linux 一键安装](https://github.com/DoriyaNet/CloudVMController/wiki/Linux-Install)。
 
 ## 功能概览
 
@@ -60,6 +85,7 @@ npm start
 | --- | --- |
 | [快速开始](https://github.com/DoriyaNet/CloudVMController/wiki/Quick-Start) | 安装、首次连接与基础配置 |
 | [Windows 一键安装](https://github.com/DoriyaNet/CloudVMController/wiki/Windows-Install) | 安装脚本、cloudvm 命令与更新 |
+| [Linux 一键安装](https://github.com/DoriyaNet/CloudVMController/wiki/Linux-Install) | 安装脚本、cloudvm 命令与更新 |
 | [Linode](https://github.com/DoriyaNet/CloudVMController/wiki/Linode) | 令牌权限、多令牌管理、实例创建、IP 交换与换新 |
 | [Oracle Cloud](https://github.com/DoriyaNet/CloudVMController/wiki/Oracle-Cloud) | API 密钥、IAM 策略、实例创建、监控、备份、串口与终止 |
 | [使用指南](https://github.com/DoriyaNet/CloudVMController/wiki/Usage) | 开关机、SOCKS 代理与多账户路由 |
