@@ -5,15 +5,18 @@ param(
     [string]$Branch = "main",
     [string]$Repository = "DoriyaNet/CloudVMController",
     [switch]$NoLaunch,
+    [switch]$NoStart,
     [switch]$NoPath,
     [switch]$Force,
     [switch]$SkipDeps,
-    [string]$Proxy = ""
+    [string]$Proxy = "",
+    [Alias("Env")]
+    [string[]]$SetEnv = @()
 )
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
-$InstallerVersion = "1.0.0"
+$InstallerVersion = "1.1.0"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 function Write-Info {
@@ -92,7 +95,7 @@ function Copy-AppFiles {
         [string]$TargetRoot
     )
     New-Item -ItemType Directory -Path $TargetRoot -Force | Out-Null
-    $directories = @("public", "server", "tests", "scripts")
+    $directories = @("public", "server", "tests", "scripts", "docs")
     foreach ($directory in $directories) {
         $source = Join-Path $SourceRoot $directory
         if (-not (Test-Path -LiteralPath $source)) {
@@ -110,6 +113,16 @@ function Copy-AppFiles {
         if (Test-Path -LiteralPath $source) {
             Copy-Item -LiteralPath $source -Destination (Join-Path $TargetRoot $file) -Force
         }
+    }
+}
+
+function Ensure-EnvFile {
+    param([string]$TargetRoot)
+    $envPath = Join-Path $TargetRoot ".env"
+    $examplePath = Join-Path $TargetRoot ".env.example"
+    if (-not (Test-Path -LiteralPath $envPath) -and (Test-Path -LiteralPath $examplePath)) {
+        Copy-Item -LiteralPath $examplePath -Destination $envPath -Force
+        Write-Info "已创建 .env，可从 .env.example 中查看 GitHub App 配置项。"
     }
 }
 
@@ -425,7 +438,16 @@ if (Test-Path -LiteralPath (Join-Path $targetDir ".git")) {
     $installMode = "zip"
 }
 
+Ensure-EnvFile -TargetRoot $targetDir
 Write-Config -AppDir $targetDir -LauncherDir $launcherDir -NodePath $nodeRuntime.NodePath -NpmPath $nodeRuntime.NpmPath -InstallMode $installMode
+
+if ($SetEnv.Count -gt 0) {
+    Write-Info "写入 .env 配置..."
+    & (Join-Path $launcherDir "cloudvm.ps1") env set @SetEnv
+    if (-not $?) {
+        throw ".env 配置写入失败。"
+    }
+}
 
 if (-not $NoPath) {
     Add-UserPath -PathToAdd $launcherDir
@@ -435,12 +457,16 @@ Write-Host ""
 Write-Success "安装完成。"
 Write-Host "安装目录：$targetDir"
 Write-Host "配置目录：$homeDir"
+Write-Host "环境文件：$(Join-Path $targetDir '.env')"
 Write-Host "快捷指令：$cmdPath"
 Write-Host "更新模式：$installMode"
 Write-Host ""
 Write-Host "可用命令："
-Write-Host "  cloudvm            启动并打开浏览器"
+Write-Host "  cloudvm start      启动服务（不打开浏览器）"
+Write-Host "  cloudvm open       在桌面环境中打开 Web 界面"
 Write-Host "  cloudvm status     查看状态"
+Write-Host "  cloudvm env list   查看 .env 配置"
+Write-Host "  cloudvm env set K=V 修改 .env 配置"
 Write-Host "  cloudvm update     更新软件"
 Write-Host "  cloudvm update-script  更新 cloudvm 脚本"
 
@@ -450,7 +476,7 @@ if ($NoPath) {
     Write-Host "请打开新的终端窗口，然后运行 cloudvm。"
 }
 
-if (-not $NoLaunch) {
+if (-not $NoLaunch -and -not $NoStart) {
     Write-Host ""
     & (Join-Path $launcherDir "cloudvm.ps1") start
 }

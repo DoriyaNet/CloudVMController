@@ -14,6 +14,209 @@ export function escapeHtml(value) {
   });
 }
 
+function parseIpv6Address(value) {
+  const address = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!address || address.includes(".")) {
+    return null;
+  }
+
+  const halves = address.split("::");
+  if (halves.length > 2) {
+    return null;
+  }
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const groupCount = left.length + right.length;
+  if (
+    (halves.length === 1 && groupCount !== 8) ||
+    (halves.length === 2 && groupCount > 7)
+  ) {
+    return null;
+  }
+
+  const groups = [
+    ...left,
+    ...Array(halves.length === 2 ? 8 - groupCount : 0).fill("0"),
+    ...right,
+  ];
+  if (
+    groups.length !== 8 ||
+    groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))
+  ) {
+    return null;
+  }
+  return groups.map((group) => Number.parseInt(group, 16));
+}
+
+function formatIpv6Address(groups) {
+  const values = groups.map((group) => group.toString(16));
+  let bestStart = -1;
+  let bestLength = 1;
+
+  for (let index = 0; index < values.length; ) {
+    if (values[index] !== "0") {
+      index += 1;
+      continue;
+    }
+    let end = index;
+    while (end < values.length && values[end] === "0") {
+      end += 1;
+    }
+    const length = end - index;
+    if (length > bestLength) {
+      bestStart = index;
+      bestLength = length;
+    }
+    index = end;
+  }
+
+  if (bestStart < 0) {
+    return values.join(":");
+  }
+  const left = values.slice(0, bestStart).join(":");
+  const right = values.slice(bestStart + bestLength).join(":");
+  return `${left}::${right}`;
+}
+
+export function ipv6RangeHost(range, hostHextet = "10") {
+  const raw = String(range || "").trim();
+  const [addressPart, prefixPart] = raw.split("/");
+  const prefix = Number(prefixPart ?? 64);
+  const groups = parseIpv6Address(addressPart);
+  const host = Number.parseInt(String(hostHextet || "10"), 16);
+
+  if (
+    !groups ||
+    !Number.isInteger(prefix) ||
+    prefix < 0 ||
+    prefix > 128 ||
+    !Number.isInteger(host) ||
+    host < 0 ||
+    host > 0xffff
+  ) {
+    return null;
+  }
+
+  groups[7] = host;
+  const hostAddress = formatIpv6Address(groups);
+  return {
+    range: raw,
+    prefix,
+    hostAddress,
+    cidr: `${hostAddress}/${prefix}`,
+  };
+}
+
+export function buildIpv6BindScripts({
+  range,
+  instanceId = "",
+  allowIcmp = true,
+} = {}) {
+  const details = ipv6RangeHost(range);
+  if (!details) {
+    return null;
+  }
+
+  const safeId =
+    String(instanceId || "instance")
+      .trim()
+      .replace(/[^a-zA-Z0-9_-]/g, "-") || "instance";
+  const unitName = `cloudvm-ipv6-${safeId}`;
+  const detectInterface = `IFACE="$(ip -4 route show default 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')"
+if [ -z "$IFACE" ]; then
+  IFACE="$(ip -6 route show default 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')"
+fi
+if [ -z "$IFACE" ]; then
+  IFACE="eth0"
+fi`;
+  const sudoSetup = `SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  SUDO="sudo"
+fi`;
+  const firewall = allowIcmp
+    ? `if command -v ip6tables >/dev/null 2>&1; then
+  $SUDO ip6tables -C INPUT -p ipv6-icmp -j ACCEPT 2>/dev/null || $SUDO ip6tables -I INPUT -p ipv6-icmp -j ACCEPT
+fi`
+    : "";
+  const systemdFirewall = allowIcmp
+    ? `ExecStart=/bin/sh -c 'if command -v ip6tables >/dev/null 2>&1; then ip6tables -C INPUT -p ipv6-icmp -j ACCEPT 2>/dev/null || ip6tables -I INPUT -p ipv6-icmp -j ACCEPT || true; fi'\n`
+    : "";
+
+  const temporary = `#!/usr/bin/env bash
+set -euo pipefail
+
+CIDR="${details.cidr}"
+
+${detectInterface}
+${sudoSetup}
+
+$SUDO ip -6 addr replace "$CIDR" dev "$IFACE"
+${firewall ? `${firewall}\n` : ""}echo "已临时绑定 $CIDR 到 $IFACE；重启后失效。"
+ip -6 addr show dev "$IFACE" | grep -F "$CIDR" || true
+`;
+
+  const permanent = `#!/usr/bin/env bash
+set -euo pipefail
+
+CIDR="${details.cidr}"
+UNIT_NAME="${unitName}"
+UNIT_PATH="/etc/systemd/system/$UNIT_NAME.service"
+
+${detectInterface}
+${sudoSetup}
+IP_BIN="$(command -v ip || true)"
+if [ -z "$IP_BIN" ]; then
+  IP_BIN="/sbin/ip"
+fi
+
+$SUDO tee "$UNIT_PATH" >/dev/null <<EOF
+[Unit]
+Description=Bind routed IPv6 $CIDR to $IFACE
+After=network-online.target cloud-init.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$IP_BIN -6 addr replace $CIDR dev $IFACE
+${systemdFirewall}RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable --now "$UNIT_NAME.service"
+echo "已永久绑定 $CIDR 到 $IFACE。"
+echo "开机服务：$UNIT_NAME.service"
+`;
+
+  const remove = `#!/usr/bin/env bash
+set -euo pipefail
+
+CIDR="${details.cidr}"
+UNIT_NAME="${unitName}"
+
+${detectInterface}
+${sudoSetup}
+
+$SUDO systemctl disable --now "$UNIT_NAME.service" 2>/dev/null || true
+$SUDO rm -f "/etc/systemd/system/$UNIT_NAME.service"
+$SUDO systemctl daemon-reload
+$SUDO ip -6 addr del "$CIDR" dev "$IFACE" 2>/dev/null || true
+echo "已撤销 $CIDR 的永久绑定。"
+`;
+
+  return {
+    ...details,
+    unitName,
+    temporary,
+    permanent,
+    remove,
+  };
+}
+
 export function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }

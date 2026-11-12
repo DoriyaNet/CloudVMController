@@ -84,7 +84,13 @@ export function createApi({ onUnauthorized } = {}) {
         },
       );
 
-      if (response.status === 401 && !skipUnauthorized) {
+      const authError = [
+        "not_authenticated",
+        "reauth_required",
+        "vault_locked",
+        "github_user_not_allowed",
+      ].includes(apiError.code);
+      if (authError || (response.status === 401 && !skipUnauthorized)) {
         onUnauthorized?.(apiError);
       }
 
@@ -97,6 +103,20 @@ export function createApi({ onUnauthorized } = {}) {
   return {
     request,
     session: () => request("/session"),
+    authSession: () => request("/session"),
+    logout: () => request("/auth/logout", { method: "POST" }),
+    installations: () => request("/github/installations"),
+    repositories: (installationId) =>
+      request(
+        withQuery("/github/repositories", "installationId", installationId),
+      ),
+    vaultStatus: ({ installationId, repository } = {}) =>
+      request(
+        withQueries("/vault/status", { installationId, repository }),
+      ),
+    unlockVault: (payload) =>
+      request("/vault/unlock", { method: "POST", body: payload }),
+    lockVault: () => request("/vault/lock", { method: "POST" }),
     settings: () => request("/settings"),
     addToken: (payload) =>
       request("/settings/tokens", {

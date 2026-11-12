@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 
 CLOUDVM_HOME="${CLOUDVM_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/cloudvmcontroller}"
 CONFIG_FILE="${CLOUDVM_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/cloudvmcontroller/config.env}"
@@ -15,10 +15,10 @@ COMMAND="start"
 COMMAND_SET=0
 FORCE=0
 NO_RESTART=0
-NO_OPEN=0
 FOLLOW=0
 TAIL=40
 PROXY="${CLOUDVM_PROXY:-}"
+ENV_ARGS=()
 
 CLOUDVM_APP_DIR=""
 CLOUDVM_LAUNCHER_DIR="$CLOUDVM_HOME/bin"
@@ -54,24 +54,31 @@ CloudVMController 命令行
   cloudvm [命令] [选项]
 
 命令：
-  start            启动服务并打开浏览器（默认）
+  start            启动服务（默认，不打开浏览器）
   stop             停止由 cloudvm 启动的服务
   restart          重启服务
   status           查看运行状态
-  open             打开 Web 界面
+  open             在桌面环境中打开 Web 界面
   logs             查看日志
   update           更新软件并重新安装依赖
   update-script    从 GitHub 更新 cloudvm 脚本
+  env              查看或修改 .env 配置
   version          查看版本
   help             显示帮助
 
 选项：
-      --no-open      启动时不打开浏览器
       --no-restart   更新后不自动重启
       --force        更新时强制覆盖本地修改
       --tail <n>     日志行数，默认 40
       --follow       持续输出日志
       --proxy <url>  GitHub 下载代理，例如 http://127.0.0.1:7890
+
+环境变量：
+  cloudvm env list
+  cloudvm env get PORT
+  cloudvm env set HOST=0.0.0.0 PORT=8080
+  cloudvm env set GITHUB_APP_PRIVATE_KEY=@/path/to/key.pem
+  cloudvm env unset PORT
 EOF
 }
 
@@ -86,7 +93,6 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --no-open)
-            NO_OPEN=1
             shift
             ;;
         --follow)
@@ -108,6 +114,16 @@ while [[ $# -gt 0 ]]; do
             COMMAND="help"
             COMMAND_SET=1
             shift
+            ;;
+        env)
+            if [[ "$COMMAND_SET" -eq 1 && "$COMMAND" != "env" ]]; then
+                die "只能指定一个命令"
+            fi
+            COMMAND="env"
+            COMMAND_SET=1
+            shift
+            ENV_ARGS=("$@")
+            break
             ;;
         start|stop|restart|status|open|logs|update|update-script|version|help)
             if [[ "$COMMAND_SET" -eq 1 && "$COMMAND" != "$1" ]]; then
@@ -144,6 +160,7 @@ fi
 
 [[ -n "$CLOUDVM_APP_DIR" ]] || die "配置缺少 CLOUDVM_APP_DIR"
 [[ -f "$CLOUDVM_APP_DIR/package.json" ]] || die "安装目录无效：$CLOUDVM_APP_DIR"
+APP_ENV_FILE="$CLOUDVM_APP_DIR/.env"
 
 if [[ -z "$CLOUDVM_INSTALL_MODE" ]]; then
     if [[ -d "$CLOUDVM_APP_DIR/.git" ]]; then
@@ -194,12 +211,320 @@ app_version() {
 env_value() {
     local key="$1"
     local file="$2"
-    local value=""
-    if [[ -f "$file" ]]; then
-        value="$(grep -m 1 "^[[:space:]]*$key[[:space:]]*=" "$file" | tail -n 1 | cut -d= -f2- || true)"
+    [[ -f "$file" ]] || return 0
+    ENV_KEY="$key" awk '
+        BEGIN {
+            key = ENVIRON["ENV_KEY"]
+            found = 0
+            collecting = 0
+            quote = ""
+            value = ""
+        }
+        !collecting {
+            if ($0 ~ "^[[:space:]]*" key "[[:space:]]*=") {
+                found = 1
+                line = $0
+                sub(/\r$/, "", line)
+                sub(/^[^=]*=[[:space:]]*/, "", line)
+                sub(/[[:space:]]+$/, "", line)
+                q = substr(line, 1, 1)
+                if ((q == "\"" || q == sprintf("%c", 39)) && !(length(line) > 1 && substr(line, length(line), 1) == q)) {
+                    collecting = 1
+                    quote = q
+                    value = substr(line, 2)
+                } else {
+                    value = line
+                    exit
+                }
+            }
+            next
+        }
+        collecting {
+            line = $0
+            sub(/\r$/, "", line)
+            if (substr(line, length(line), 1) == quote) {
+                value = value "\n" substr(line, 1, length(line) - 1)
+                collecting = 0
+                exit
+            }
+            value = value "\n" line
+        }
+        END {
+            if (!found) {
+                exit 0
+            }
+            if (length(value) >= 2) {
+                q = substr(value, 1, 1)
+                if ((q == "\"" || q == sprintf("%c", 39)) && substr(value, length(value), 1) == q) {
+                    value = substr(value, 2, length(value) - 2)
+                }
+            }
+            printf "%s", value
+        }
+    ' "$file"
+}
+
+validate_env_key() {
+    local key="$1"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "无效的环境变量名：$key"
+}
+
+resolve_env_input() {
+    local value="$1"
+    if [[ "$value" == @* ]]; then
+        local path="${value#@}"
+        if [[ -f "$path" ]]; then
+            local content
+            content="$(cat "$path")"
+            content="${content//$'\r'/}"
+            content="${content//$'\n'/\\n}"
+            printf '%s' "$content"
+            return 0
+        fi
     fi
-    value="$(printf '%s' "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
     printf '%s' "$value"
+}
+
+set_env_value() {
+    local key="$1"
+    local value="$2"
+    local temporary
+    touch "$APP_ENV_FILE"
+    temporary="$(mktemp "$APP_ENV_FILE.tmp.XXXXXX")"
+    if ! ENV_KEY="$key" ENV_LINE="$key=$value" awk '
+        BEGIN {
+            key = ENVIRON["ENV_KEY"]
+            line = ENVIRON["ENV_LINE"]
+            written = 0
+            skipping = 0
+            quote = ""
+        }
+        skipping {
+            end = $0
+            sub(/\r$/, "", end)
+            if (substr(end, length(end), 1) == quote) {
+                skipping = 0
+            }
+            next
+        }
+        $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            if (!written) {
+                print line
+                written = 1
+            }
+            value = $0
+            sub(/\r$/, "", value)
+            sub(/^[^=]*=[[:space:]]*/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            q = substr(value, 1, 1)
+            if ((q == "\"" || q == sprintf("%c", 39)) && !(length(value) > 1 && substr(value, length(value), 1) == q)) {
+                skipping = 1
+                quote = q
+            }
+            next
+        }
+        { print }
+        END {
+            if (!written) {
+                print line
+            }
+        }
+    ' "$APP_ENV_FILE" > "$temporary"; then
+        rm -f "$temporary"
+        die "写入 .env 失败：$APP_ENV_FILE"
+    fi
+    mv -f "$temporary" "$APP_ENV_FILE"
+    chmod 0600 "$APP_ENV_FILE" 2>/dev/null || true
+}
+
+unset_env_value() {
+    local key="$1"
+    local count
+    local temporary
+    if [[ ! -f "$APP_ENV_FILE" ]]; then
+        info "$key 未设置。"
+        return 0
+    fi
+    count="$(grep -cE "^[[:space:]]*$key[[:space:]]*=" "$APP_ENV_FILE" || true)"
+    if [[ "$count" -eq 0 ]]; then
+        info "$key 未设置。"
+        return 0
+    fi
+    temporary="$(mktemp "$APP_ENV_FILE.tmp.XXXXXX")"
+    if ! ENV_KEY="$key" awk '
+        BEGIN {
+            key = ENVIRON["ENV_KEY"]
+            skipping = 0
+            quote = ""
+        }
+        skipping {
+            end = $0
+            sub(/\r$/, "", end)
+            if (substr(end, length(end), 1) == quote) {
+                skipping = 0
+            }
+            next
+        }
+        $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            value = $0
+            sub(/\r$/, "", value)
+            sub(/^[^=]*=[[:space:]]*/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            q = substr(value, 1, 1)
+            if ((q == "\"" || q == sprintf("%c", 39)) && !(length(value) > 1 && substr(value, length(value), 1) == q)) {
+                skipping = 1
+                quote = q
+            }
+            next
+        }
+        { print }
+    ' "$APP_ENV_FILE" > "$temporary"; then
+        rm -f "$temporary"
+        die "写入 .env 失败：$APP_ENV_FILE"
+    fi
+    mv -f "$temporary" "$APP_ENV_FILE"
+    chmod 0600 "$APP_ENV_FILE" 2>/dev/null || true
+    success "$key 已删除。"
+}
+
+list_env() {
+    [[ -f "$APP_ENV_FILE" ]] || die "未找到 .env：$APP_ENV_FILE"
+    awk '
+        BEGIN {
+            skipping = 0
+            quote = ""
+        }
+        skipping {
+            end = $0
+            sub(/\r$/, "", end)
+            if (substr(end, length(end), 1) == quote) {
+                skipping = 0
+            }
+            next
+        }
+        /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/ {
+            line = $0
+            key = line
+            sub(/[[:space:]]*=.*/, "", key)
+            sub(/^[[:space:]]+/, "", key)
+            upper = toupper(key)
+            if (upper ~ /(SECRET|TOKEN|PASSWORD|PRIVATE_KEY|PROXY)/) {
+                printf "%s=***\n", key
+            } else {
+                print line
+            }
+            value = $0
+            sub(/\r$/, "", value)
+            sub(/^[^=]*=[[:space:]]*/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            q = substr(value, 1, 1)
+            if ((q == "\"" || q == sprintf("%c", 39)) && !(length(value) > 1 && substr(value, length(value), 1) == q)) {
+                skipping = 1
+                quote = q
+            }
+        }
+    ' "$APP_ENV_FILE"
+}
+
+get_env() {
+    local key="$1"
+    validate_env_key "$key"
+    if [[ ! -f "$APP_ENV_FILE" ]] || ! grep -qE "^[[:space:]]*$key[[:space:]]*=" "$APP_ENV_FILE"; then
+        die "$key 未设置。"
+    fi
+    printf '%s\n' "$(env_value "$key" "$APP_ENV_FILE")"
+}
+
+set_env() {
+    local assignments=()
+    local entry
+    local key
+    local value
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            *=*)
+                assignments+=("$1")
+                shift
+                ;;
+            -*)
+                die "未知 env 选项：$1"
+                ;;
+            *)
+                [[ $# -ge 2 ]] || die "用法：cloudvm env set KEY=VALUE ..."
+                assignments+=("$1=$2")
+                shift 2
+                ;;
+        esac
+    done
+    [[ ${#assignments[@]} -gt 0 ]] || die "用法：cloudvm env set KEY=VALUE ..."
+    for entry in "${assignments[@]}"; do
+        key="${entry%%=*}"
+        value="${entry#*=}"
+        validate_env_key "$key"
+        value="$(resolve_env_input "$value")"
+        if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+            die "$key 的值包含换行。可先将内容保存到文件，再使用 $key=@/path/to/file。"
+        fi
+        set_env_value "$key" "$value"
+        success "$key 已更新。"
+    done
+    printf '配置文件：%s\n' "$APP_ENV_FILE"
+    if running_pid >/dev/null 2>&1; then
+        info "服务正在运行，重启后生效：cloudvm restart"
+    fi
+}
+
+show_env_help() {
+    cat <<'EOF'
+管理 .env 配置
+
+用法：
+  cloudvm env list
+  cloudvm env get <KEY>
+  cloudvm env set <KEY=VALUE> [KEY=VALUE ...]
+  cloudvm env set <KEY> <VALUE>
+  cloudvm env set <KEY>=@<FILE>
+  cloudvm env unset <KEY> [KEY ...]
+
+说明：
+  - 修改后需要执行 cloudvm restart 才会生效。
+  - list 会隐藏 SECRET、TOKEN、PASSWORD、PRIVATE_KEY、PROXY 的值。
+  - 多行内容（例如 PEM）可保存为文件后用 KEY=@/path/to/file 写入。
+EOF
+}
+
+env_command() {
+    local action="${1:-list}"
+    local key
+    [[ $# -gt 0 ]] && shift
+    case "$action" in
+        list|ls)
+            list_env
+            ;;
+        get)
+            [[ $# -eq 1 ]] || die "用法：cloudvm env get <KEY>"
+            get_env "$1"
+            ;;
+        set)
+            set_env "$@"
+            ;;
+        unset|remove|rm)
+            [[ $# -ge 1 ]] || die "用法：cloudvm env unset <KEY> [KEY ...]"
+            for key in "$@"; do
+                validate_env_key "$key"
+                unset_env_value "$key"
+            done
+            if running_pid >/dev/null 2>&1; then
+                info "服务正在运行，重启后生效：cloudvm restart"
+            fi
+            ;;
+        help|-h|--help)
+            show_env_help
+            ;;
+        *)
+            die "未知 env 命令：$action"
+            ;;
+    esac
 }
 
 app_port() {
@@ -421,9 +746,6 @@ start_app() {
     url="$(app_url)"
     if health_check; then
         success "CloudVMController 已在运行：$url"
-        if [[ "$NO_OPEN" -eq 0 ]]; then
-            open_app
-        fi
         return 0
     fi
 
@@ -455,9 +777,6 @@ start_app() {
         if health_check; then
             success "CloudVMController 已启动：$url"
             printf '日志：%s\n' "$LOG_DIR"
-            if [[ "$NO_OPEN" -eq 0 ]]; then
-                open_app
-            fi
             return 0
         fi
     done
@@ -545,7 +864,7 @@ copy_app_files() {
     local directory
     local file
     mkdir -p "$target"
-    for directory in public server tests scripts; do
+    for directory in public server tests scripts docs; do
         if [[ -d "$source/$directory" ]]; then
             rm -rf "$target/$directory"
             cp -a "$source/$directory" "$target/$directory"
@@ -708,6 +1027,13 @@ case "$COMMAND" in
         ;;
     update-script)
         update_script
+        ;;
+    env)
+        if [[ ${#ENV_ARGS[@]} -eq 0 ]]; then
+            env_command
+        else
+            env_command "${ENV_ARGS[@]}"
+        fi
         ;;
     version)
         show_version

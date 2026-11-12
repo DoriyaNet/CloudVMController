@@ -2,6 +2,7 @@ import { extractPoints, latestValue, renderLineChart } from "./charts.js";
 import { icon } from "./icons.js";
 import { getOracleRegion } from "./oracle-regions.js";
 import {
+  buildIpv6BindScripts,
   clamp,
   countryFlag,
   emptyState,
@@ -1761,6 +1762,9 @@ export function renderSettings(state) {
   const oracleAccounts = Array.isArray(settings.oracleAccounts)
     ? settings.oracleAccounts
     : [];
+  const auth = state.auth || {};
+  const githubVault = auth.mode === "github";
+  const vaultMeta = auth.vaultMeta || state.session?.vault || {};
   const connected = Boolean(settings.tokenConfigured && !state.authInvalid);
   const poolSize =
     Number(settings.poolSize) ||
@@ -1780,10 +1784,81 @@ export function renderSettings(state) {
       ${pageHeader({
         eyebrow: "SYSTEM",
         title: "连接与设置",
-        description: "管理 Linode API 令牌、Oracle Cloud OCI 密钥、本地 SOCKS 代理和刷新偏好。",
+        description: githubVault
+          ? "管理 GitHub 保险库中的 Linode API 令牌、OCI 密钥、SOCKS 代理和刷新偏好。"
+          : "管理 Linode API 令牌、Oracle Cloud OCI 密钥、本地 SOCKS 代理和刷新偏好。",
       })}
 
       <div class="settings-grid">
+        ${
+          githubVault
+            ? `
+              <section class="panel settings-panel settings-vault-panel">
+                <div class="settings-panel-heading">
+                  <span class="settings-icon is-connected">${icon("shield")}</span>
+                  <div>
+                    <span class="panel-kicker">GITHUB VAULT</span>
+                    <h2>GitHub 保险库</h2>
+                  </div>
+                  <span class="status-badge ${auth.vaultUnlocked ? "status-running" : "status-offline"}">
+                    <span class="status-indicator"></span>
+                    ${auth.vaultUnlocked ? "已解锁" : "已锁定"}
+                  </span>
+                </div>
+
+                <div class="vault-account-row">
+                  <span class="avatar auth-gate-avatar">${escapeHtml(
+                    (auth.user?.name || auth.user?.login || "GH")
+                      .split(/\s+/)
+                      .slice(0, 2)
+                      .map((part) => part[0] || "")
+                      .join("")
+                      .toUpperCase() || "GH",
+                  )}</span>
+                  <span class="vault-account-copy">
+                    <strong>${escapeHtml(auth.user?.name || auth.user?.login || "GitHub 用户")}</strong>
+                    <small>@${escapeHtml(auth.user?.login || "github")}</small>
+                  </span>
+                </div>
+
+                <div class="settings-list settings-list-compact">
+                  <div>
+                    <dt>私有仓库</dt>
+                    <dd class="mono">${escapeHtml(vaultMeta.repository || auth.selectedRepository || "—")}</dd>
+                  </div>
+                  <div>
+                    <dt>密文路径</dt>
+                    <dd><code>.cloudvm/vault.json</code></dd>
+                  </div>
+                  <div>
+                    <dt>保险库状态</dt>
+                    <dd>${auth.vaultUnlocked ? "已在本机内存中解锁" : "需要重新解锁"}</dd>
+                  </div>
+                </div>
+
+                <p class="settings-note">
+                  ${icon("shield")}
+                  <span>保险库使用 PBKDF2-SHA256 与 AES-256-GCM 加密后写入 GitHub 私有仓库。密码只在解锁时提交给本机 Node 服务，并仅保留在进程内存中。</span>
+                </p>
+
+                <div class="settings-actions">
+                  ${
+                    vaultMeta.htmlUrl
+                      ? `<a class="button button-secondary button-sm" href="${escapeHtml(vaultMeta.htmlUrl)}" target="_blank" rel="noreferrer">${icon("external-link")} 查看仓库文件</a>`
+                      : ""
+                  }
+                  <button type="button" class="button button-secondary button-sm" data-action="lock-vault">
+                    ${icon("key")} 锁定保险库
+                  </button>
+                  <button type="button" class="button button-secondary button-sm" data-action="logout">
+                    ${icon("logout")} 退出 GitHub
+                  </button>
+                </div>
+              </section>
+            `
+            : ""
+        }
+
         <section class="panel settings-panel settings-token-panel">
           <div class="settings-panel-heading">
             <span class="settings-icon ${connected ? "is-connected" : ""}">${icon("shield")}</span>
@@ -1873,7 +1948,11 @@ export function renderSettings(state) {
 
           <p class="settings-note">
             ${icon("shield")}
-            <span>令牌不会返回给浏览器。服务端使用 AES-256-GCM 加密后保存到 <code>data/settings.json</code>，密钥单独存放在 <code>data/.key</code>。</span>
+            <span>${
+              githubVault
+                ? "完整令牌只在解锁后由服务端内存持有，不会返回给浏览器。保险库以 AES-256-GCM 密文保存到 GitHub 私有仓库的 <code>.cloudvm/vault.json</code>。"
+                : "令牌不会返回给浏览器。服务端使用 AES-256-GCM 加密后保存到 <code>data/settings.json</code>，密钥单独存放在 <code>data/.key</code>。"
+            }</span>
           </p>
         </section>
 
@@ -1903,7 +1982,11 @@ export function renderSettings(state) {
             </span>
           </div>
 
-          <div class="token-pool-note">${icon("shield")}<span>使用租户 OCID、用户 OCID、API 密钥指纹和 RSA 私钥进行请求签名。私钥只会加密保存在本地 Node 服务中，不会返回浏览器。</span></div>
+          <div class="token-pool-note">${icon("shield")}<span>${
+            githubVault
+              ? "使用租户 OCID、用户 OCID、API 密钥指纹和 RSA 私钥进行请求签名。私钥随保险库加密保存在 GitHub 私有仓库中，不会返回浏览器。"
+              : "使用租户 OCID、用户 OCID、API 密钥指纹和 RSA 私钥进行请求签名。私钥只会加密保存在本地 Node 服务中，不会返回浏览器。"
+          }</span></div>
 
           <div class="token-list">
             ${
@@ -2036,7 +2119,7 @@ export function renderSettings(state) {
             <div><dt>API 地址</dt><dd class="mono">${escapeHtml(state.session?.apiBase || "https://api.linode.com/v4")}</dd></div>
             <div><dt>界面语言</dt><dd>简体中文</dd></div>
             <div><dt>计费单位</dt><dd>USD</dd></div>
-            <div><dt>控制台版本</dt><dd>v${escapeHtml(state.session?.version || "1.1.0")}</dd></div>
+            <div><dt>控制台版本</dt><dd>v${escapeHtml(state.session?.version || "1.2.0")}</dd></div>
           </div>
         </section>
 
@@ -2050,8 +2133,16 @@ export function renderSettings(state) {
           </div>
           <ul class="security-list">
             <li><span>${icon("check")}</span>Linode 使用最小权限令牌；Oracle 使用专用 IAM 用户和独立 API 密钥。</li>
-            <li><span>${icon("check")}</span>令牌、OCI 私钥和代理密码加密保存在本机，不写入浏览器 localStorage。</li>
-            <li><span>${icon("check")}</span>若需通过公网访问，请在前面加 HTTPS 反向代理，并限制来源 IP。</li>
+            <li><span>${icon("check")}</span>${
+              githubVault
+                ? "令牌、OCI 私钥和代理密码只存在于加密保险库与已解锁的服务端内存中，不写入浏览器 localStorage。"
+                : "令牌、OCI 私钥和代理密码加密保存在本机，不写入浏览器 localStorage。"
+            }</li>
+            <li><span>${icon("check")}</span>${
+              githubVault
+                ? "GitHub 登录已限制控制台访问；公网部署仍应启用 HTTPS，并建议限制 GitHub 用户白名单。"
+                : "若需通过公网访问，请在前面加 HTTPS 反向代理，并限制来源 IP。"
+            }</li>
             <li><span>${icon("check")}</span>删除或终止实例不可恢复；控制台会要求输入实例名称二次确认。</li>
           </ul>
         </section>
@@ -2087,7 +2178,7 @@ export function renderDisconnected(state) {
     <section class="page page-disconnected">
       <div class="connect-card">
         <span class="connect-mark">${icon("cloud")}</span>
-        <span class="eyebrow">CLOUDVMCONTROLLER / LOCAL</span>
+        <span class="eyebrow">CLOUDVMCONTROLLER / ${state.auth?.mode === "github" ? "GITHUB VAULT" : "LOCAL"}</span>
         <h1>连接你的云账户</h1>
         <p>连接 Linode 或 Oracle Cloud，在一个本地控制面中查看实例、执行开关机与重启。Linode 支持部署、监控和 IP 管理；OCI 支持创建、监控、启动卷备份和串口控制台。</p>
         <div class="connect-actions">
@@ -2105,7 +2196,11 @@ export function renderDisconnected(state) {
           <span><strong>03</strong> 多云账户</span>
           <span><strong>04</strong> 加密凭据</span>
         </div>
-        <p class="connect-foot">${icon("shield")} 浏览器不会接触或持久化令牌与私钥；所有凭据由本地 Node 服务加密管理。</p>
+        <p class="connect-foot">${icon("shield")} ${
+          state.auth?.mode === "github"
+            ? "浏览器不会持久化令牌与私钥；所有凭据由 GitHub 私有仓库保险库加密管理。"
+            : "浏览器不会持久化令牌与私钥；所有凭据由本地 Node 服务加密管理。"
+        }</p>
       </div>
     </section>
   `;
@@ -2590,6 +2685,198 @@ export function renderIpRenewModal(state) {
             </button>
           </div>
         </form>
+      </section>
+    </div>
+  `;
+}
+
+export function renderIpv6BindModal(state) {
+  const modal = state.modal;
+  if (!modal || modal.type !== "ipv6-bind") {
+    return "";
+  }
+
+  const targets = Array.isArray(modal.targets) ? modal.targets : [];
+  const activeTarget =
+    targets.find(
+      (target) => String(target.id) === String(modal.activeTargetId),
+    ) || targets[0];
+  if (!activeTarget) {
+    return "";
+  }
+
+  const mode = modal.mode === "permanent" ? "permanent" : "temporary";
+  const plan = buildIpv6BindScripts({
+    range: activeTarget.range,
+    instanceId: activeTarget.id,
+    allowIcmp: modal.allowIcmp !== false,
+  });
+  const script = plan
+    ? mode === "permanent"
+      ? plan.permanent
+      : plan.temporary
+    : "";
+  const role = activeTarget.role || "当前实例";
+  const targetLabel =
+    activeTarget.label || `linode-${activeTarget.id || "instance"}`;
+
+  return `
+    <div class="modal-layer">
+      <div class="modal-backdrop" data-action="close-modal"></div>
+      <section class="modal-card modal-ipv6-bind" role="dialog" aria-modal="true" aria-labelledby="ipv6-bind-title">
+        <button type="button" class="icon-button modal-close" data-action="close-modal" aria-label="关闭">${icon("x")}</button>
+        <span class="modal-mark">${icon("terminal")}</span>
+        <span class="eyebrow">ROUTED IPV6 RANGE</span>
+        <h2 id="ipv6-bind-title">新 IPv6 已就绪</h2>
+        <p>路由段已经切换，通常无需重启实例。选择实例和绑定方式，复制脚本后在对应实例的 Linux SSH 终端中执行；若仍不可达，再重启一次确认。</p>
+
+        ${
+          targets.length > 1
+            ? `<div class="ipv6-bind-targets" role="tablist" aria-label="选择实例">
+                ${targets
+                  .map(
+                    (target) => `
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected="${String(target.id) === String(activeTarget.id)}"
+                        class="ipv6-bind-target${String(target.id) === String(activeTarget.id) ? " is-active" : ""}"
+                        data-action="ipv6-bind-target"
+                        data-id="${escapeHtml(target.id)}"
+                      >
+                        <span>${escapeHtml(target.role || "实例")}</span>
+                        <strong>${escapeHtml(target.label || `linode-${target.id}`)}</strong>
+                        <code class="mono">${escapeHtml(target.range || "")}</code>
+                      </button>
+                    `,
+                  )
+                  .join("")}
+              </div>`
+            : ""
+        }
+
+        <div class="ipv6-bind-summary">
+          <div>
+            <span>实例</span>
+            <strong>${escapeHtml(targetLabel)}</strong>
+            <small>#${escapeHtml(activeTarget.id || "—")} · ${escapeHtml(role)}</small>
+          </div>
+          <div>
+            <span>IPv6 路由段</span>
+            <code class="mono">${escapeHtml(activeTarget.range || "—")}</code>
+          </div>
+          <div>
+            <span>建议主机地址</span>
+            <span class="ipv6-bind-address-row">
+              <code class="mono">${escapeHtml(plan?.hostAddress || "无法生成")}</code>
+              ${
+                plan
+                  ? `<button type="button" class="copy-button" data-copy="${escapeHtml(plan.hostAddress)}" aria-label="复制 IPv6 主机地址">${icon("copy")}</button>`
+                  : ""
+              }
+            </span>
+          </div>
+        </div>
+
+        <div class="ip-swap-kind ipv6-bind-modes" role="group" aria-label="选择绑定方式">
+          <button
+            type="button"
+            class="ip-swap-kind-option${mode === "temporary" ? " is-active" : ""}"
+            data-action="ipv6-bind-mode"
+            data-mode="temporary"
+          >
+            <span class="ip-swap-kind-copy">
+              <strong>临时绑定</strong>
+              <small>立即生效，重启后失效</small>
+            </span>
+            <span class="ip-swap-kind-state is-ready">先测试</span>
+          </button>
+          <button
+            type="button"
+            class="ip-swap-kind-option${mode === "permanent" ? " is-active" : ""}"
+            data-action="ipv6-bind-mode"
+            data-mode="permanent"
+          >
+            <span class="ip-swap-kind-copy">
+              <strong>永久绑定</strong>
+              <small>systemd 开机自动补绑</small>
+            </span>
+            <span class="ip-swap-kind-state">长期使用</span>
+          </button>
+        </div>
+
+        <div class="ip-swap-note">
+          ${icon("info")}
+          <span>${
+            mode === "permanent"
+              ? "永久脚本会安装 systemd 服务，每次开机后重新添加地址，不要求关闭 Network Helper。适用于使用 systemd 的 Linux。"
+              : "临时脚本只在当前系统内添加地址，重启后失效；如果 Network Helper 重写网络配置，也需要重新执行。"
+          }</span>
+        </div>
+
+        <label class="simple-checkbox ipv6-bind-icmp">
+          <input type="checkbox" id="ipv6-bind-icmp" ${modal.allowIcmp === false ? "" : "checked"} />
+          <span>${icon("check")}</span>
+          <span>同时在 <code>ip6tables</code> 中放行 ICMPv6，便于 ping 测试</span>
+        </label>
+
+        <div class="ipv6-bind-code">
+          <div class="ipv6-bind-code-heading">
+            <span>${mode === "permanent" ? "持久化脚本" : "临时脚本"} · bash</span>
+            <button
+              type="button"
+              class="button button-secondary button-sm"
+              data-copy-target="ipv6-bind-script"
+            >
+              ${icon("copy")} 复制脚本
+            </button>
+          </div>
+          ${
+            plan
+              ? `<pre><code id="ipv6-bind-script">${escapeHtml(script)}</code></pre>`
+              : `<div class="ipv6-bind-code-empty">${icon("alert")} 无法从路由段生成脚本，请手动配置 IPv6 地址。</div>`
+          }
+        </div>
+
+        <div class="ipv6-bind-hint">
+          ${icon("terminal")}
+          <span>在实例内以 root 或可执行 <code>sudo</code> 的账户粘贴运行。脚本会自动识别默认路由网卡；多网卡环境请先确认回退的 <code>eth0</code> 是否正确。</span>
+        </div>
+        ${
+          plan
+            ? `<div class="ipv6-bind-hint">
+                ${icon("info")}
+                <span>入站测试使用 <code>ping -6 -c 4 ${escapeHtml(plan.hostAddress)}</code>；出站默认源地址不保证切换，可用 <code>curl -6 --interface ${escapeHtml(plan.hostAddress)} https://ipv6.icanhazip.com</code> 验证。使用 nftables、firewalld 或 UFW 时仍要在对应防火墙放行 ICMPv6。</span>
+              </div>`
+            : ""
+        }
+
+        ${
+          mode === "permanent" && plan
+            ? `<details class="ipv6-bind-remove">
+                <summary>${icon("trash")} 撤销永久绑定</summary>
+                <p>会停止并删除 systemd 服务，并从当前网卡移除这个地址；不会恢复旧的 IPv6 路由段，也不会删除可能已加入的 ICMPv6 防火墙规则。</p>
+                <div class="ipv6-bind-code is-secondary">
+                  <div class="ipv6-bind-code-heading">
+                    <span>卸载脚本 · bash</span>
+                    <button type="button" class="button button-secondary button-sm" data-copy-target="ipv6-bind-remove-script">
+                      ${icon("copy")} 复制
+                    </button>
+                  </div>
+                  <pre><code id="ipv6-bind-remove-script">${escapeHtml(plan.remove)}</code></pre>
+                </div>
+              </details>`
+            : ""
+        }
+
+        <div class="ipv6-bind-footnote">
+          ${icon("shield")}
+          <span>脚本只复制到剪贴板，控制台不会连接实例或自动执行。执行前请确认地址没有被其它服务占用。</span>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" class="button button-primary" data-action="close-modal">完成</button>
+        </div>
       </section>
     </div>
   `;
@@ -3422,6 +3709,19 @@ export function renderDrawer(state) {
             >
               ${icon("zap")} <span>换新 IP</span>
             </button>
+            ${
+              routedIpv6Ranges.length > 0
+                ? `<button
+                    type="button"
+                    class="button button-secondary button-sm"
+                    data-action="open-ipv6-bind"
+                    data-id="${escapeHtml(instance.id)}"
+                    data-token-id="${escapeHtml(instance.tokenId || "")}"
+                  >
+                    ${icon("terminal")} <span>绑定 IPv6</span>
+                  </button>`
+                : ""
+            }
           </div>
         </div>
       </section>

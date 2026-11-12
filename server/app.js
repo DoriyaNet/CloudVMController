@@ -21,6 +21,9 @@ import {
   normalizeOracleInstance,
 } from "./oracle.js";
 import { SettingsStoreError } from "./settings-store.js";
+import { AuthError } from "./auth/errors.js";
+import { VaultError } from "./vault-crypto.js";
+import { VaultStoreError } from "./vault-store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PUBLIC_DIR = path.resolve(__dirname, "../public");
@@ -59,6 +62,10 @@ function setSecurityHeaders(response) {
   response.setHeader("X-Frame-Options", "DENY");
   response.setHeader("Referrer-Policy", "no-referrer");
   response.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  response.setHeader(
+    "Strict-Transport-Security",
+    "max-age=31536000; includeSubDomains",
+  );
   response.setHeader(
     "Permissions-Policy",
     "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
@@ -1298,12 +1305,13 @@ function oracleComputeProbeUrl(account, endpointResolver) {
 }
 
 function createRouter({
-  settingsStore,
+  settingsStore: defaultSettingsStore,
   apiBase,
   publicDir,
   oracleEndpointResolver,
 }) {
-  return async function route(request, response) {
+  return async function route(request, response, context = {}) {
+    const settingsStore = context.settingsStore || defaultSettingsStore;
     const url = new URL(request.url, "http://localhost");
     const { pathname } = url;
 
@@ -1322,9 +1330,10 @@ function createRouter({
         return;
       }
       sendJson(response, 200, {
+        mode: "local",
         ...settingsStore.getPublicSettings(),
         apiBase: apiBase || DEFAULT_API_BASE,
-        version: "1.1.0",
+        version: "1.2.0",
       });
       return;
     }
@@ -1352,7 +1361,7 @@ function createRouter({
       const token = cleanString(body.token, { maxLength: 512 });
       const proxy = settingsStore.getProxyConfig();
       const verification = await verifyApiToken({ token, apiBase, proxy });
-      const tokenId = settingsStore.addToken({
+      const tokenId = await settingsStore.addToken({
         label: body.label,
         token,
         accountLabel: verification.accountLabel,
@@ -1384,7 +1393,7 @@ function createRouter({
         apiBase,
         proxy,
       });
-      const tokenId = settingsStore.addToken({
+      const tokenId = await settingsStore.addToken({
         label: "从 .env 导入",
         token: envToken,
         accountLabel: verification.accountLabel,
@@ -1409,8 +1418,8 @@ function createRouter({
         apiBase,
         proxy,
       });
-      settingsStore.activateToken(record.id);
-      settingsStore.recordVerification(record.id, {
+      await settingsStore.activateToken(record.id);
+      await settingsStore.recordVerification(record.id, {
         accountLabel: verification.accountLabel,
       });
       sendJson(response, 200, {
@@ -1432,7 +1441,7 @@ function createRouter({
         apiBase,
         proxy,
       });
-      settingsStore.recordVerification(record.id, {
+      await settingsStore.recordVerification(record.id, {
         accountLabel: verification.accountLabel,
       });
       sendJson(response, 200, {
@@ -1447,7 +1456,7 @@ function createRouter({
       /^\/api\/settings\/tokens\/([0-9a-f-]+)$/,
     );
     if (tokenDeleteMatch && request.method === "DELETE") {
-      settingsStore.removeToken(tokenDeleteMatch[1]);
+      await settingsStore.removeToken(tokenDeleteMatch[1]);
       sendJson(response, 200, {
         ok: true,
         settings: settingsStore.getPublicSettings(),
@@ -1470,7 +1479,7 @@ function createRouter({
         proxy,
         endpointResolver: oracleEndpointResolver,
       });
-      const accountId = settingsStore.addOracleAccount({
+      const accountId = await settingsStore.addOracleAccount({
         label: normalized.label,
         tenancyId: normalized.tenancyId,
         userId: normalized.userId,
@@ -1500,7 +1509,7 @@ function createRouter({
         proxy,
         endpointResolver: oracleEndpointResolver,
       });
-      settingsStore.recordOracleVerification(account.id);
+      await settingsStore.recordOracleVerification(account.id);
       sendJson(response, 200, {
         ok: true,
         verification,
@@ -1513,7 +1522,7 @@ function createRouter({
       /^\/api\/settings\/oracle-accounts\/([0-9a-f-]+)$/,
     );
     if (oracleDeleteMatch && request.method === "DELETE") {
-      settingsStore.removeOracleAccount(oracleDeleteMatch[1]);
+      await settingsStore.removeOracleAccount(oracleDeleteMatch[1]);
       sendJson(response, 200, {
         ok: true,
         settings: settingsStore.getPublicSettings(),
@@ -1527,7 +1536,7 @@ function createRouter({
         enabledByDefault: false,
       });
       createProxyAgent({ ...draft, enabled: true });
-      settingsStore.updateProxy({
+      await settingsStore.updateProxy({
         enabled: body.enabled === true,
         url: draft.url,
         username: draft.username,
@@ -2911,6 +2920,19 @@ function formatError(error) {
     };
   }
 
+  if (
+    error instanceof AuthError ||
+    error instanceof VaultError ||
+    error instanceof VaultStoreError
+  ) {
+    return {
+      status: error.status || 500,
+      code: error.code || "AUTH_ERROR",
+      message: error.message,
+      details: [],
+    };
+  }
+
   return {
     status: 500,
     code: "INTERNAL_ERROR",
@@ -2921,12 +2943,13 @@ function formatError(error) {
 
 export function createRequestHandler({
   settingsStore,
+  auth = null,
   apiBase = DEFAULT_API_BASE,
   publicDir = DEFAULT_PUBLIC_DIR,
   oracleEndpointResolver = null,
   logger = console,
 } = {}) {
-  if (!settingsStore) {
+  if (!settingsStore && !auth?.enabled) {
     throw new Error("A settingsStore instance is required.");
   }
   const route = createRouter({
@@ -2941,6 +2964,29 @@ export function createRequestHandler({
     setSecurityHeaders(response);
 
     try {
+      const url = new URL(request.url || "/", "http://localhost");
+      if (auth?.enabled) {
+        const handled = await auth.handle(request, response, url);
+        if (handled) {
+          return;
+        }
+
+        if (
+          url.pathname === "/api/health" ||
+          !url.pathname.startsWith("/api/")
+        ) {
+          await route(request, response);
+          return;
+        }
+
+        const resolved = await auth.resolve(request, response);
+        await route(request, response, {
+          settingsStore: resolved.settingsStore,
+          auth: resolved,
+        });
+        return;
+      }
+
       await route(request, response);
     } catch (error) {
       const formatted = formatError(error);

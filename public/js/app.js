@@ -1,4 +1,5 @@
 import { ApiError, createApi } from "./api.js";
+import { renderAuthGate } from "./auth.js";
 import { icon, mountIcons } from "./icons.js";
 import {
   oracleRegionGroups,
@@ -12,6 +13,7 @@ import {
   escapeHtml,
   generatePassword,
   getPlanPrice,
+  ipv6RangeHost,
   isTransitional,
   passwordStrength,
   randomInstanceLabel,
@@ -26,6 +28,7 @@ import {
   renderDisconnected,
   renderDrawer as renderDrawerView,
   renderIpRenewModal,
+  renderIpv6BindModal,
   renderIpSwapModal,
   renderInstances,
   renderInstancesSkeleton,
@@ -43,6 +46,7 @@ import {
 
 const PREFS_KEY = "cloudvm:prefs";
 const LEGACY_PREFS_KEY = "linode-pilot:prefs";
+const VAULT_SELECTION_KEY = "cloudvm:vault-selection";
 const AUTO_REFRESH_INTERVAL = 30_000;
 const VIEW_META = {
   overview: { title: "概览" },
@@ -131,7 +135,25 @@ function newOracleCreateState() {
 }
 
 const state = {
-  session: { tokenConfigured: false, apiBase: "", version: "1.1.0" },
+  session: { tokenConfigured: false, apiBase: "", version: "1.2.0" },
+  auth: {
+    mode: "local",
+    configured: false,
+    authenticated: false,
+    user: null,
+    gate: "",
+    installations: [],
+    repositories: [],
+    selectedInstallationId: "",
+    selectedRepository: "",
+    vaultExists: null,
+    vaultUnlocked: false,
+    vaultMeta: null,
+    loading: false,
+    vaultLoading: false,
+    busy: false,
+    error: "",
+  },
   settings: null,
   sessionError: "",
   authInvalid: false,
@@ -327,6 +349,33 @@ function friendlyError(error) {
   if (!error) {
     return "发生未知错误。";
   }
+  if (error.code === "not_authenticated" || error.code === "reauth_required") {
+    return "GitHub 登录已过期，请重新登录。";
+  }
+  if (error.code === "vault_locked") {
+    return "保险库已锁定，请重新解锁。";
+  }
+  if (error.code === "vault_password_invalid") {
+    return "保险库密码不正确。";
+  }
+  if (error.code === "vault_conflict") {
+    return "保险库已在其他设备更新，请重新解锁后再试。";
+  }
+  if (error.code === "vault_rate_limited") {
+    return error.message || "保险库解锁尝试过多，请稍后再试。";
+  }
+  if (error.code === "repository_not_found" || error.code === "repository_forbidden") {
+    return "GitHub App 无权访问该私有仓库，或仓库不存在。";
+  }
+  if (error.code === "vault_format_invalid") {
+    return "保险库文件格式无效或已损坏。";
+  }
+  if (error.code === "vault_too_large") {
+    return "保险库文件超过大小限制。";
+  }
+  if (error.code === "installation_forbidden") {
+    return "当前 GitHub 用户无权访问该 GitHub App installation。";
+  }
   if (error.status === 401) {
     return error.message || "API 凭据无效或已过期，请重新连接。";
   }
@@ -348,7 +397,422 @@ function friendlyError(error) {
   return error.message || "请求失败，请稍后重试。";
 }
 
+function vaultSelectionStorageKey() {
+  return `${VAULT_SELECTION_KEY}:${state.auth.user?.id || "anonymous"}`;
+}
+
+function readVaultSelection() {
+  try {
+    const parsed = JSON.parse(
+      localStorage.getItem(vaultSelectionStorageKey()) || "null",
+    );
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+    return {
+      installationId: String(parsed.installationId || ""),
+      repository: String(parsed.repository || ""),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveVaultSelection() {
+  try {
+    localStorage.setItem(
+      vaultSelectionStorageKey(),
+      JSON.stringify({
+        installationId: state.auth.selectedInstallationId,
+        repository: state.auth.selectedRepository,
+      }),
+    );
+  } catch {
+    // Storage can be disabled; the selection simply won't persist.
+  }
+}
+
+function setAuthGate(gate) {
+  state.auth.gate = gate;
+  document.body.classList.toggle("auth-gate", Boolean(gate));
+}
+
+function resetCloudState() {
+  state.settings = null;
+  state.overview = null;
+  state.catalog = null;
+  state.overviewError = null;
+  state.catalogError = "";
+  state.authInvalid = false;
+  state.loading = true;
+  state.modal = null;
+  state.create = newCreateState();
+  state.oracleCreate = newOracleCreateState();
+  state.creating = false;
+  state.createError = "";
+  state.oracleCreating = false;
+  state.oracleCreateError = "";
+  state.busyActions.clear();
+  state.detail = {
+    ...state.detail,
+    open: false,
+    data: null,
+    loading: false,
+    error: null,
+    returnFocus: null,
+  };
+}
+
+function resetAuthState() {
+  const configured = state.auth.configured;
+  state.auth = {
+    mode: "github",
+    configured,
+    authenticated: false,
+    user: null,
+    gate: "login",
+    installations: [],
+    repositories: [],
+    selectedInstallationId: "",
+    selectedRepository: "",
+    vaultExists: null,
+    vaultUnlocked: false,
+    vaultMeta: null,
+    loading: false,
+    vaultLoading: false,
+    busy: false,
+    error: "",
+  };
+  state.session = {
+    ...state.session,
+    credentialSource: "none",
+    credentialLabel: "",
+    tokenConfigured: false,
+  };
+}
+
+function applyGithubSession(session) {
+  const vault = session?.vault || null;
+  state.auth.mode = "github";
+  state.auth.configured = session?.configured !== false;
+  state.auth.authenticated = session?.authenticated === true;
+  state.auth.user = session?.user || null;
+  state.auth.vaultUnlocked = vault?.unlocked === true;
+  state.auth.vaultMeta = vault;
+  if (vault?.installationId) {
+    state.auth.selectedInstallationId = String(vault.installationId);
+  }
+  if (vault?.repository) {
+    state.auth.selectedRepository = String(vault.repository);
+  }
+  if (vault?.unlocked === true) {
+    state.auth.vaultExists = true;
+  }
+  if (vault?.repository) {
+    saveVaultSelection();
+  }
+  if (session?.authError === "github_user_not_allowed") {
+    state.auth.error = "当前 GitHub 用户不在允许名单中，请联系部署者。";
+  }
+  state.session = {
+    ...state.session,
+    ...session,
+  };
+}
+
+async function loadVaultStatus({ render = true } = {}) {
+  if (
+    !state.auth.selectedInstallationId ||
+    !state.auth.selectedRepository
+  ) {
+    state.auth.vaultExists = null;
+    if (render) {
+      renderView();
+    }
+    return;
+  }
+
+  state.auth.vaultLoading = true;
+  state.auth.error = "";
+  if (render) {
+    renderView();
+  }
+
+  try {
+    const status = await api.vaultStatus({
+      installationId: state.auth.selectedInstallationId,
+      repository: state.auth.selectedRepository,
+    });
+    state.auth.vaultExists = status?.exists === true;
+    state.auth.vaultMeta = status || null;
+    saveVaultSelection();
+  } catch (error) {
+    state.auth.vaultExists = null;
+    state.auth.vaultMeta = null;
+    state.auth.error = friendlyError(error);
+  } finally {
+    state.auth.vaultLoading = false;
+    if (render) {
+      renderView();
+    }
+  }
+}
+
+async function loadGithubAuthResources() {
+  state.auth.loading = true;
+  state.auth.error = "";
+  state.auth.repositories = [];
+  state.auth.selectedRepository = "";
+  state.auth.vaultExists = null;
+  state.auth.vaultMeta = null;
+  renderView();
+
+  try {
+    const installationsPayload = await api.installations();
+    state.auth.installations = Array.isArray(installationsPayload?.installations)
+      ? installationsPayload.installations
+      : [];
+
+    const saved = readVaultSelection();
+    const preferredInstallation = state.auth.installations.find(
+      (installation) => String(installation.id) === saved?.installationId,
+    );
+    const installation = preferredInstallation || state.auth.installations[0];
+    state.auth.selectedInstallationId = installation
+      ? String(installation.id)
+      : "";
+
+    if (installation) {
+      const repositoriesPayload = await api.repositories(installation.id);
+      state.auth.repositories = Array.isArray(repositoriesPayload?.repositories)
+        ? repositoriesPayload.repositories
+        : [];
+
+      const preferredRepository = state.auth.repositories.find(
+        (repository) =>
+          (repository.fullName || repository.full_name) === saved?.repository,
+      );
+      const repository = preferredRepository || state.auth.repositories[0];
+      state.auth.selectedRepository = repository
+        ? repository.fullName || repository.full_name || ""
+        : "";
+    }
+
+    saveVaultSelection();
+    if (state.auth.selectedRepository) {
+      await loadVaultStatus({ render: false });
+    }
+  } catch (error) {
+    state.auth.error = friendlyError(error);
+  } finally {
+    state.auth.loading = false;
+    renderView();
+  }
+}
+
+async function selectVaultInstallation(installationId) {
+  state.auth.selectedInstallationId = String(installationId || "");
+  state.auth.selectedRepository = "";
+  state.auth.repositories = [];
+  state.auth.vaultExists = null;
+  state.auth.vaultMeta = null;
+  state.auth.error = "";
+  saveVaultSelection();
+
+  if (!state.auth.selectedInstallationId) {
+    renderView();
+    return;
+  }
+
+  state.auth.loading = true;
+  renderView();
+  try {
+    const payload = await api.repositories(state.auth.selectedInstallationId);
+    state.auth.repositories = Array.isArray(payload?.repositories)
+      ? payload.repositories
+      : [];
+    const repository = state.auth.repositories[0];
+    state.auth.selectedRepository = repository
+      ? repository.fullName || repository.full_name || ""
+      : "";
+    saveVaultSelection();
+    if (state.auth.selectedRepository) {
+      await loadVaultStatus({ render: false });
+    }
+  } catch (error) {
+    state.auth.error = friendlyError(error);
+  } finally {
+    state.auth.loading = false;
+    renderView();
+  }
+}
+
+async function selectVaultRepository(repository) {
+  state.auth.selectedRepository = String(repository || "");
+  state.auth.vaultExists = null;
+  state.auth.vaultMeta = null;
+  state.auth.error = "";
+  saveVaultSelection();
+  await loadVaultStatus();
+}
+
+async function refreshVaultStatus() {
+  await loadVaultStatus();
+}
+
+async function initializeGithubAuth(session) {
+  applyGithubSession(session);
+  state.initialised = true;
+  state.loading = false;
+
+  if (!state.auth.authenticated) {
+    resetCloudState();
+    setAuthGate("login");
+    renderView();
+    return;
+  }
+
+  if (state.auth.vaultUnlocked) {
+    setAuthGate("");
+    if (session?.settings) {
+      applySettings(session.settings);
+    } else {
+      await loadSettings({ suppressRender: true });
+      if (state.auth.gate) {
+        return;
+      }
+    }
+    await loadInitialData();
+    return;
+  }
+
+  setAuthGate("vault");
+  state.auth.loading = true;
+  renderView();
+  await loadGithubAuthResources();
+}
+
+async function handleVaultSubmit(event) {
+  event.preventDefault();
+  if (state.auth.busy) {
+    return;
+  }
+
+  const password =
+    document.querySelector("#vault-password")?.value || "";
+  const confirmation =
+    document.querySelector("#vault-password-confirm")?.value || "";
+
+  if (!state.auth.selectedInstallationId) {
+    state.auth.error = "请选择一个 GitHub App installation。";
+    renderView();
+    return;
+  }
+  if (!state.auth.selectedRepository) {
+    state.auth.error = "请选择一个私有仓库。";
+    renderView();
+    return;
+  }
+  if (!password) {
+    state.auth.error = "请输入保险库密码。";
+    renderView();
+    return;
+  }
+  if (state.auth.vaultExists === false) {
+    if (password.length < 8) {
+      state.auth.error = "保险库密码至少需要 8 位。";
+      renderView();
+      return;
+    }
+    if (password !== confirmation) {
+      state.auth.error = "两次输入的保险库密码不一致。";
+      renderView();
+      return;
+    }
+  }
+
+  state.auth.busy = true;
+  state.auth.error = "";
+  renderView();
+
+  try {
+    const result = await api.unlockVault({
+      installationId: Number(state.auth.selectedInstallationId),
+      repository: state.auth.selectedRepository,
+      password,
+    });
+    state.auth.busy = false;
+    state.auth.vaultUnlocked = true;
+    state.auth.vaultExists = true;
+    state.auth.vaultMeta = result?.vault || state.auth.vaultMeta;
+    state.auth.error = "";
+    setAuthGate("");
+    if (result?.settings) {
+      applySettings(result.settings);
+    }
+    state.loading = true;
+    renderView();
+    await loadInitialData();
+    showToast(
+      result?.created ? "GitHub 保险库已创建并解锁" : "GitHub 保险库已解锁",
+      "success",
+    );
+  } catch (error) {
+    state.auth.busy = false;
+    state.auth.error = friendlyError(error);
+    renderView();
+  }
+}
+
+async function lockVault() {
+  try {
+    await api.lockVault();
+  } catch (error) {
+    showToast(friendlyError(error), "error");
+    return;
+  }
+  state.auth.vaultUnlocked = false;
+  state.auth.vaultExists = true;
+  state.auth.busy = false;
+  state.auth.error = "";
+  resetCloudState();
+  setAuthGate("vault");
+  if (state.auth.installations.length === 0) {
+    await loadGithubAuthResources();
+  } else {
+    renderView();
+  }
+  updateShell();
+  showToast("GitHub 保险库已锁定", "info");
+}
+
+async function logoutGithub() {
+  try {
+    await api.logout();
+  } catch (error) {
+    showToast(friendlyError(error), "error");
+    return;
+  }
+  resetCloudState();
+  resetAuthState();
+  setAuthGate("login");
+  renderView();
+  updateShell();
+  showToast("已退出 GitHub", "info");
+}
+
 function updateShell() {
+  document.body.classList.toggle("auth-gate", Boolean(state.auth.gate));
+  const workspaceName = document.querySelector(".sidebar-cloud strong");
+  const workspaceEnv = document.querySelector(".sidebar-cloud-env");
+  if (workspaceName) {
+    workspaceName.textContent =
+      state.auth.mode === "github" ? "GitHub vault" : "Local workspace";
+  }
+  if (workspaceEnv) {
+    workspaceEnv.textContent =
+      state.auth.mode === "github" ? "GITHUB" : "LOCAL";
+  }
   const activeView = VIEW_META[state.view] ? state.view : "overview";
   elements.topbarTitle.textContent = VIEW_META[activeView].title;
   document.title = `${VIEW_META[activeView].title} · CloudVMController`;
@@ -395,13 +859,24 @@ function updateShell() {
         .join(" · ")
     : account?.email || oraclePrimary?.providerLabel || tokenSourceLabel();
   const avatar = multiAccount ? "MA" : account ? initials(name) : "CV";
-  elements.sidebarAvatar.textContent = avatar;
-  elements.topbarAvatarText.textContent = avatar;
-  elements.sidebarAccountName.textContent =
-    accountSlices.length > 0 ? name : state.overview ? "云账户" : "未连接";
-  elements.sidebarAccountEmail.textContent =
-    accountSlices.length > 0 ? email : tokenSourceLabel();
-  elements.tokenButton.title = `API 凭据：${tokenSourceLabel()}`;
+  if (state.auth.gate && state.auth.mode === "github" && state.auth.user) {
+    const githubName =
+      state.auth.user.name || state.auth.user.login || "GitHub";
+    const githubAvatar = initials(githubName);
+    elements.sidebarAvatar.textContent = githubAvatar;
+    elements.topbarAvatarText.textContent = githubAvatar;
+    elements.sidebarAccountName.textContent = githubName;
+    elements.sidebarAccountEmail.textContent = `@${state.auth.user.login}`;
+    elements.tokenButton.title = "GitHub 保险库";
+  } else {
+    elements.sidebarAvatar.textContent = avatar;
+    elements.topbarAvatarText.textContent = avatar;
+    elements.sidebarAccountName.textContent =
+      accountSlices.length > 0 ? name : state.overview ? "云账户" : "未连接";
+    elements.sidebarAccountEmail.textContent =
+      accountSlices.length > 0 ? email : tokenSourceLabel();
+    elements.tokenButton.title = `API 凭据：${tokenSourceLabel()}`;
+  }
   elements.tokenButton.classList.toggle("has-credentials", hasCredentials());
 
   let statusClass = "is-idle";
@@ -447,6 +922,11 @@ function renderView() {
   updateShell();
 
   if (!state.initialised) {
+    return;
+  }
+
+  if (state.auth.gate) {
+    paintView(renderAuthGate(state));
     return;
   }
 
@@ -1143,7 +1623,11 @@ function renderModal() {
           <span class="modal-mark">${icon("key")}</span>
           <span class="eyebrow">SECURE CONNECTION</span>
           <h2 id="token-modal-title">${hasServerToken ? "添加 Linode 令牌" : "连接你的 Linode 账户"}</h2>
-          <p>令牌会加密保存在本地 Node 服务中，可用于多个实例和浏览器会话。</p>
+          <p>${
+            state.auth.mode === "github"
+              ? "令牌会加密写入 GitHub 私有仓库保险库，可用于多个实例和浏览器会话。"
+              : "令牌会加密保存在本地 Node 服务中，可用于多个实例和浏览器会话。"
+          }</p>
 
           <div class="form-alert${state.modal.error ? "" : " is-hidden"}" id="token-error" role="alert">
             ${icon("alert")}
@@ -1198,7 +1682,11 @@ function renderModal() {
           </form>
 
           <div class="modal-foot">
-            <span>${icon("shield")} 保存在本机 data/settings.json</span>
+            <span>${
+              state.auth.mode === "github"
+                ? `${icon("shield")} 保存在 GitHub 私有仓库 .cloudvm/vault.json`
+                : `${icon("shield")} 保存在本机 data/settings.json`
+            }</span>
             <a href="https://cloud.linode.com/profile/tokens" target="_blank" rel="noreferrer">
               创建令牌 ${icon("external-link")}
             </a>
@@ -1215,7 +1703,11 @@ function renderModal() {
           <span class="modal-mark">${icon("cloud")}</span>
           <span class="eyebrow">ORACLE CLOUD INFRASTRUCTURE</span>
           <h2 id="oracle-modal-title">连接 OCI 账户</h2>
-          <p>使用 OCI API 签名密钥访问 Compute API。私钥会加密保存在本地 Node 服务中，不会返回浏览器。</p>
+          <p>${
+            state.auth.mode === "github"
+              ? "使用 OCI API 签名密钥访问 Compute API。私钥会随保险库加密写入 GitHub 私有仓库，不会返回浏览器。"
+              : "使用 OCI API 签名密钥访问 Compute API。私钥会加密保存在本地 Node 服务中，不会返回浏览器。"
+          }</p>
 
           <div class="form-alert${state.modal.error ? "" : " is-hidden"}" id="oracle-error" role="alert">
             ${icon("alert")}
@@ -1311,7 +1803,7 @@ function renderModal() {
           <span class="modal-mark modal-mark-danger">${icon("cloud")}</span>
           <span class="eyebrow eyebrow-danger">REMOVE OCI ACCOUNT</span>
           <h2 id="delete-oracle-title">删除本地 OCI 账户</h2>
-          <p>将从本机加密存储中删除 <strong>${escapeHtml(account.label)}</strong>（${escapeHtml(oracleRegionLabel(account.region))}）。这不会删除 OCI 上的用户或 API 密钥。</p>
+          <p>将从${state.auth.mode === "github" ? "GitHub 保险库" : "本机加密存储"}中删除 <strong>${escapeHtml(account.label)}</strong>（${escapeHtml(oracleRegionLabel(account.region))}）。这不会删除 OCI 上的用户或 API 密钥。</p>
           <form id="delete-oracle-form">
             <div class="form-alert is-hidden" id="delete-oracle-error" role="alert">${icon("alert")}<span></span></div>
             <div class="modal-actions">
@@ -1332,7 +1824,7 @@ function renderModal() {
           <span class="modal-mark modal-mark-danger">${icon("key")}</span>
           <span class="eyebrow eyebrow-danger">REMOVE CREDENTIAL</span>
           <h2 id="delete-token-title">删除本地令牌</h2>
-          <p>将从本机加密存储中删除 <strong>${escapeHtml(token.label)}</strong>（${escapeHtml(token.masked)}）。这不会撤销 Linode 上的 Personal Access Token。</p>
+          <p>将从${state.auth.mode === "github" ? "GitHub 保险库" : "本机加密存储"}中删除 <strong>${escapeHtml(token.label)}</strong>（${escapeHtml(token.masked)}）。这不会撤销 Linode 上的 Personal Access Token。</p>
           <form id="delete-token-form">
             <div class="form-alert is-hidden" id="delete-token-error" role="alert">${icon("alert")}<span></span></div>
             <div class="modal-actions">
@@ -1372,6 +1864,8 @@ function renderModal() {
     elements.modalRoot.innerHTML = renderIpSwapModal(state);
   } else if (state.modal.type === "ip-renew") {
     elements.modalRoot.innerHTML = renderIpRenewModal(state);
+  } else if (state.modal.type === "ipv6-bind") {
+    elements.modalRoot.innerHTML = renderIpv6BindModal(state);
   } else if (state.modal.type === "oracle-backup") {
     elements.modalRoot.innerHTML = renderOracleBackupModal(state);
   } else if (state.modal.type === "oracle-backup-delete") {
@@ -1413,7 +1907,12 @@ async function connectWithToken(rawToken, { label = "", activate = true } = {}) 
   renderModal();
   updateShell();
   await refreshAfterSettingsChange();
-  showToast("API 令牌已加密保存", "success");
+  showToast(
+    state.auth.mode === "github"
+      ? "API 令牌已写入 GitHub 保险库"
+      : "API 令牌已加密保存",
+    "success",
+  );
 }
 
 async function connectOracleAccount(payload) {
@@ -1423,7 +1922,12 @@ async function connectOracleAccount(payload) {
   renderModal();
   updateShell();
   await refreshAfterSettingsChange();
-  showToast("Oracle Cloud 账户已验证并加密保存", "success");
+  showToast(
+    state.auth.mode === "github"
+      ? "Oracle Cloud 账户已验证并写入 GitHub 保险库"
+      : "Oracle Cloud 账户已验证并加密保存",
+    "success",
+  );
 }
 
 async function handleOracleSubmit(event) {
@@ -1525,7 +2029,10 @@ async function handleDeleteOracleSubmit(event) {
     state.modal = null;
     renderModal();
     await refreshAfterSettingsChange();
-    showToast(`OCI 账户 ${account.label} 已从本机删除`, "success");
+    showToast(
+      `OCI 账户 ${account.label} ${state.auth.mode === "github" ? "已从保险库删除" : "已从本机删除"}`,
+      "success",
+    );
   } catch (error) {
     if (state.modal?.type === "delete-oracle") {
       errorElement.classList.remove("is-hidden");
@@ -1835,6 +2342,34 @@ async function handleOracleTerminateSubmit(event) {
 }
 
 function handleUnauthorized(error) {
+  if (state.auth.mode === "github") {
+    if (
+      error.code === "not_authenticated" ||
+      error.code === "reauth_required" ||
+      error.code === "github_user_not_allowed"
+    ) {
+      state.auth.authenticated = false;
+      state.auth.vaultUnlocked = false;
+      state.auth.error =
+        error.code === "github_user_not_allowed"
+          ? "当前 GitHub 用户不在允许名单中，请联系部署者。"
+          : "GitHub 登录已过期，请重新登录。";
+      resetCloudState();
+      setAuthGate("login");
+      renderView();
+      updateShell();
+      return;
+    }
+    if (error.code === "vault_locked") {
+      state.auth.vaultUnlocked = false;
+      resetCloudState();
+      setAuthGate("vault");
+      renderView();
+      updateShell();
+      return;
+    }
+  }
+
   state.authInvalid = true;
   state.overviewError = friendlyError(error);
   updateShell();
@@ -1931,7 +2466,10 @@ async function handleDeleteTokenSubmit(event) {
     state.modal = null;
     renderModal();
     await refreshAfterSettingsChange();
-    showToast(`令牌 ${token.label} 已从本机删除`, "success");
+    showToast(
+      `令牌 ${token.label} ${state.auth.mode === "github" ? "已从保险库删除" : "已从本机删除"}`,
+      "success",
+    );
   } catch (error) {
     if (state.modal?.type === "delete-token") {
       errorElement.classList.remove("is-hidden");
@@ -2162,18 +2700,49 @@ async function handleIpSwapSubmit(event) {
   try {
     const sourceId = modal.instance.id;
     const tokenId = modal.instance.tokenId;
-    await api.swapIp(sourceId, tokenId, {
-      targetId: Number(modal.targetId),
+    const targetId = Number(modal.targetId);
+    const sourceLabel =
+      modal.instance.label || `linode-${sourceId}`;
+    const targetLabel =
+      modal.candidates.find(
+        (candidate) => String(candidate.id) === String(targetId),
+      )?.label || `linode-${targetId}`;
+    const swapResult = await api.swapIp(sourceId, tokenId, {
+      targetId,
       kind,
     });
 
     state.modal = null;
-    renderModal();
-    updateShell();
+    const bindModalOpened =
+      kind === "ipv6"
+        ? openIpv6BindModal({
+            source: "swap",
+            targets: [
+              {
+                id: sourceId,
+                label: sourceLabel,
+                role: "当前实例",
+                range: swapResult?.source?.newAddress || targetAddress,
+              },
+              {
+                id: targetId,
+                label: targetLabel,
+                role: "交换目标",
+                range: swapResult?.target?.newAddress || sourceAddress,
+              },
+            ],
+          })
+        : false;
+    if (!bindModalOpened) {
+      renderModal();
+      updateShell();
+    }
     const followUp =
       kind === "ipv4"
         ? "请重启两台实例后生效"
-        : "请重启两台实例，并在系统内确认新路由段的地址和 ICMPv6 防火墙配置";
+        : bindModalOpened
+          ? "请按弹窗分别复制两台实例的绑定脚本"
+          : "请重启两台实例，并在系统内配置新路由段的地址和 ICMPv6 防火墙";
     showToast(
       `已交换${kind === "ipv4" ? " IPv4 公网地址" : " IPv6 路由段"}，${followUp}`,
       "success",
@@ -2244,6 +2813,43 @@ async function openIpRenewModal(instance) {
   renderModal();
 }
 
+function openIpv6BindModal({ targets = [], source = "renew" } = {}) {
+  const preparedTargets = targets
+    .map((target) => {
+      const id = String(target.id || "").trim();
+      const plan = ipv6RangeHost(target.range);
+      if (!id || !plan) {
+        return null;
+      }
+      return {
+        id,
+        label: target.label || `linode-${id}`,
+        role: target.role || "当前实例",
+        range: plan.range,
+        prefix: plan.prefix,
+        hostAddress: plan.hostAddress,
+        cidr: plan.cidr,
+      };
+    })
+    .filter(Boolean);
+
+  if (preparedTargets.length === 0) {
+    return false;
+  }
+
+  state.modal = {
+    type: "ipv6-bind",
+    source,
+    targets: preparedTargets,
+    activeTargetId: preparedTargets[0].id,
+    mode: "temporary",
+    allowIcmp: true,
+  };
+  renderModal();
+  updateShell();
+  return true;
+}
+
 async function handleIpRenewSubmit(event) {
   event.preventDefault();
   if (state.modal?.type !== "ip-renew" || state.modal.busy) {
@@ -2276,6 +2882,8 @@ async function handleIpRenewSubmit(event) {
   try {
     const sourceId = modal.instance.id;
     const tokenId = modal.instance.tokenId;
+    const sourceLabel =
+      modal.instance.label || `linode-${sourceId}`;
     const payload =
       kind === "ipv6"
         ? { kind, ipv6Prefix: Number(modal.ipv6Prefix) === 56 ? 56 : 64 }
@@ -2283,8 +2891,24 @@ async function handleIpRenewSubmit(event) {
     const result = await api.renewIp(sourceId, tokenId, payload);
 
     state.modal = null;
-    renderModal();
-    updateShell();
+    const bindModalOpened =
+      kind === "ipv6" && result?.newRange
+        ? openIpv6BindModal({
+            source: "renew",
+            targets: [
+              {
+                id: sourceId,
+                label: sourceLabel,
+                role: "当前实例",
+                range: result.newRange,
+              },
+            ],
+          })
+        : false;
+    if (!bindModalOpened) {
+      renderModal();
+      updateShell();
+    }
 
     const newValue =
       kind === "ipv4" ? result?.newAddress || "" : result?.newRange || "";
@@ -2294,8 +2918,10 @@ async function handleIpRenewSubmit(event) {
           ? `已获取新 IPv4 地址 ${newValue}，请重启实例后生效`
           : "IPv4 已换新，请重启实例后生效"
         : newValue
-          ? `已获取新 IPv6 路由段 ${newValue}；请重启后从新段配置地址（/64 或 /56），并注意 Network Helper 可能覆盖手工配置`
-          : "IPv6 路由段已换新；请重启后从新段配置地址（/64 或 /56），并注意 Network Helper 可能覆盖手工配置",
+          ? bindModalOpened
+            ? `已获取新 IPv6 路由段 ${newValue}；请在弹窗中复制绑定脚本`
+            : `已获取新 IPv6 路由段 ${newValue}；请从新段配置地址（/64 或 /56）`
+          : "IPv6 路由段已换新；请从新段配置地址（/64 或 /56）",
       "success",
     );
 
@@ -3221,10 +3847,13 @@ async function testProxySettings(target) {
 }
 
 function handleClick(event) {
-  const copyTarget = event.target.closest("[data-copy]");
+  const copyTarget = event.target.closest("[data-copy], [data-copy-target]");
   if (copyTarget) {
     event.preventDefault();
-    void copyToClipboard(copyTarget.dataset.copy).then((copied) => {
+    const copyValue = copyTarget.dataset.copyTarget
+      ? document.getElementById(copyTarget.dataset.copyTarget)?.textContent || ""
+      : copyTarget.dataset.copy;
+    void copyToClipboard(copyValue).then((copied) => {
       showToast(copied ? "已复制到剪贴板" : "复制失败，请手动选择文本", copied ? "success" : "error");
     });
     return;
@@ -3250,6 +3879,15 @@ function handleClick(event) {
       break;
     case "open-token":
       openTokenModal();
+      break;
+    case "lock-vault":
+      void lockVault();
+      break;
+    case "logout":
+      void logoutGithub();
+      break;
+    case "refresh-vault-status":
+      void refreshVaultStatus();
       break;
     case "open-oracle":
       openOracleModal();
@@ -3412,6 +4050,30 @@ function handleClick(event) {
       void openIpRenewModal(instance);
       break;
     }
+    case "open-ipv6-bind": {
+      const instance = state.detail.data?.instance;
+      const range = state.detail.data?.ips?.ipv6Ranges?.[0]?.range;
+      if (!instance || !range) {
+        showToast("当前实例没有可绑定的 IPv6 路由段。", "info");
+        break;
+      }
+      if (
+        !openIpv6BindModal({
+          source: "drawer",
+          targets: [
+            {
+              id: instance.id,
+              label: instance.label,
+              role: "当前实例",
+              range,
+            },
+          ],
+        })
+      ) {
+        showToast("无法从当前 IPv6 路由段生成绑定脚本。", "error");
+      }
+      break;
+    }
     case "ip-renew-kind":
       if (state.modal?.type === "ip-renew" && !state.modal.busy) {
         state.modal.kind =
@@ -3425,6 +4087,19 @@ function handleClick(event) {
         state.modal.ipv6Prefix =
           target.dataset.prefix === "56" ? 56 : 64;
         state.modal.error = "";
+        renderModal();
+      }
+      break;
+    case "ipv6-bind-mode":
+      if (state.modal?.type === "ipv6-bind") {
+        state.modal.mode =
+          target.dataset.mode === "permanent" ? "permanent" : "temporary";
+        renderModal();
+      }
+      break;
+    case "ipv6-bind-target":
+      if (state.modal?.type === "ipv6-bind") {
+        state.modal.activeTargetId = String(target.dataset.id || "");
         renderModal();
       }
       break;
@@ -3564,6 +4239,14 @@ function handleInput(event) {
 function handleChange(event) {
   const target = event.target;
 
+  if (target.id === "vault-installation") {
+    void selectVaultInstallation(target.value);
+    return;
+  }
+  if (target.id === "vault-repository") {
+    void selectVaultRepository(target.value);
+    return;
+  }
   if (target.id === "oracle-region") {
     const customField = document.querySelector("#oracle-region-custom-field");
     const useCustom = target.value === CUSTOM_ORACLE_REGION;
@@ -3699,6 +4382,24 @@ function handleChange(event) {
     }
     return;
   }
+  if (target.id === "ipv6-bind-icmp") {
+    if (state.modal?.type === "ipv6-bind") {
+      state.modal.allowIcmp = target.checked;
+      const scrollPosition =
+        elements.modalRoot.querySelector(".modal-card")?.scrollTop || 0;
+      renderModal();
+      requestAnimationFrame(() => {
+        const card = elements.modalRoot.querySelector(".modal-card");
+        if (card) {
+          card.scrollTop = scrollPosition;
+        }
+        elements.modalRoot
+          .querySelector("#ipv6-bind-icmp")
+          ?.focus({ preventScroll: true });
+      });
+    }
+    return;
+  }
   if (target.id === "account-filter") {
     state.filters.account = target.value;
     renderView();
@@ -3785,7 +4486,9 @@ function handleToggle(event) {
 }
 
 function handleSubmit(event) {
-  if (event.target.id === "token-form") {
+  if (event.target.id === "vault-unlock-form") {
+    void handleVaultSubmit(event);
+  } else if (event.target.id === "token-form") {
     void handleTokenSubmit(event);
   } else if (event.target.id === "oracle-account-form") {
     void handleOracleSubmit(event);
@@ -4012,28 +4715,49 @@ async function init() {
   state.view = viewFromHash();
   bindEvents();
   updateShell();
+  const initialUrl = new URL(window.location.href);
+  if (initialUrl.searchParams.get("auth_error") === "github_user_not_allowed") {
+    state.auth.error =
+      "此 GitHub 账户不在服务器允许列表中。请使用管理员配置的 GitHub 账户登录，或检查 CLOUDVM_ALLOWED_GITHUB_USERS / CLOUDVM_ALLOWED_GITHUB_IDS。";
+    initialUrl.searchParams.delete("auth_error");
+    window.history.replaceState(
+      null,
+      "",
+      `${initialUrl.pathname}${initialUrl.search}${initialUrl.hash}`,
+    );
+  }
   try {
     sessionStorage.removeItem("linode-pilot:token");
   } catch {
     // Remove the legacy browser-session token when storage is available.
   }
 
-  const [sessionResult, settingsResult] = await Promise.allSettled([
-    api.session(),
-    api.settings(),
-  ]);
-  if (sessionResult.status === "fulfilled") {
-    state.session = { ...state.session, ...sessionResult.value };
-  } else {
-    state.sessionError = friendlyError(sessionResult.reason);
+  let session = null;
+  try {
+    session = await api.session();
+  } catch (error) {
+    state.sessionError = friendlyError(error);
   }
-  if (settingsResult.status === "fulfilled") {
-    applySettings(settingsResult.value);
-  } else if (!state.sessionError) {
-    if (sessionResult.status === "fulfilled") {
-      applySettings(sessionResult.value);
-    } else {
-      state.sessionError = friendlyError(settingsResult.reason);
+
+  if (session?.mode === "github") {
+    await initializeGithubAuth(session);
+    startAutoRefresh();
+    return;
+  }
+
+  state.auth.mode = "local";
+  if (session) {
+    state.session = { ...state.session, ...session };
+  }
+
+  try {
+    applySettings(await api.settings());
+  } catch (error) {
+    if (!state.sessionError) {
+      state.sessionError = friendlyError(error);
+    }
+    if (session) {
+      applySettings(session);
     }
   }
 

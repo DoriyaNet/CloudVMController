@@ -1,44 +1,16 @@
-import { existsSync, readFileSync } from "node:fs";
+import { createPrivateKey } from "node:crypto";
 import http from "node:http";
 import path from "node:path";
 
 import { createRequestHandler } from "./app.js";
+import { readAuthConfig } from "./auth/config.js";
+import { createAuthController } from "./auth/controller.js";
+import { loadEnvFile } from "./env.js";
 import { DEFAULT_API_BASE } from "./linode.js";
 import { openSettingsStore } from "./settings-store.js";
+import { openVaultSettingsStore } from "./vault-store.js";
 
-function loadEnvFile(filePath = path.resolve(process.cwd(), ".env")) {
-  if (!existsSync(filePath)) {
-    return;
-  }
-
-  const lines = readFileSync(filePath, "utf8").split(/\r?\n/);
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) {
-      continue;
-    }
-
-    const separator = line.indexOf("=");
-    if (separator <= 0) {
-      continue;
-    }
-
-    const key = line.slice(0, separator).trim();
-    let value = line.slice(separator + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-
-    if (key && process.env[key] === undefined) {
-      process.env[key] = value;
-    }
-  }
-}
-
-loadEnvFile();
+loadEnvFile(path.resolve(process.cwd(), ".env"));
 
 const host = process.env.HOST || "127.0.0.1";
 const rawPort = Number(process.env.PORT || 4173);
@@ -51,16 +23,105 @@ const dataDir = path.resolve(
     path.join(process.cwd(), "data"),
 );
 
-let settingsStore;
-try {
-  settingsStore = openSettingsStore({ dataDir, envToken });
-} catch (error) {
-  console.error("[server] Failed to load local settings:", error.message);
+function isLoopbackHost(value) {
+  const host = String(value || "").trim().toLowerCase();
+  return (
+    host === "127.0.0.1" ||
+    host === "::1" ||
+    host === "[::1]" ||
+    host === "localhost"
+  );
+}
+
+const authConfig = readAuthConfig(process.env);
+const loopback = isLoopbackHost(host);
+
+if (
+  authConfig.configErrors.some((message) =>
+    message.includes("CLOUDVM_AUTH_MODE"),
+  )
+) {
+  console.error(
+    `[server] Invalid auth configuration: ${authConfig.configErrors.join("; ")}`,
+  );
   process.exit(1);
 }
 
-const publicSettings = settingsStore.getPublicSettings();
-const handler = createRequestHandler({ settingsStore, apiBase });
+if (authConfig.mode === "github") {
+  if (!authConfig.configured) {
+    const details = [
+      ...authConfig.missing.map((name) => `missing ${name}`),
+      ...authConfig.configErrors,
+    ];
+    console.error(
+      `[server] GitHub auth is not configured: ${details.join("; ")}`,
+    );
+    process.exit(1);
+  }
+  if (
+    !authConfig.allowAnyUser &&
+    authConfig.allowedUsers.length === 0 &&
+    authConfig.allowedUserIds.length === 0
+  ) {
+    console.error(
+      "[server] Refusing to start without an allowlist. Set " +
+        "CLOUDVM_ALLOWED_GITHUB_USERS or CLOUDVM_ALLOWED_GITHUB_IDS, " +
+        "or explicitly set CLOUDVM_ALLOW_ANY_GITHUB_USER=1.",
+    );
+    process.exit(1);
+  }
+  try {
+    createPrivateKey(authConfig.privateKey);
+  } catch {
+    console.error(
+      "[server] GITHUB_APP_PRIVATE_KEY is not a valid RSA private key.",
+    );
+    process.exit(1);
+  }
+  if (!loopback && !authConfig.appOrigin?.startsWith("https://")) {
+    console.warn(
+      "[server] GitHub auth is enabled, but APP_ORIGIN is not an https URL. " +
+        "Use HTTPS in production so session cookies are marked Secure.",
+    );
+  }
+} else if (
+  !loopback &&
+  process.env.CLOUDVM_ALLOW_INSECURE_REMOTE !== "1"
+) {
+  console.error(
+    `[server] Refusing to bind local auth mode to ${host}. ` +
+      "Configure GitHub App auth, or set CLOUDVM_ALLOW_INSECURE_REMOTE=1 " +
+      "only when HTTPS and authentication are enforced by a reverse proxy.",
+  );
+  process.exit(1);
+}
+
+let settingsStore = null;
+try {
+  settingsStore = openSettingsStore({ dataDir, envToken });
+} catch (error) {
+  if (authConfig.mode === "github") {
+    console.warn(
+      "[server] Local settings are unavailable for vault import:",
+      error.message,
+    );
+  } else {
+    console.error("[server] Failed to load local settings:", error.message);
+    process.exit(1);
+  }
+}
+
+const auth =
+  authConfig.mode === "github"
+    ? createAuthController({
+        config: authConfig,
+        vaultStoreFactory: openVaultSettingsStore,
+        localSettingsStore: settingsStore,
+      })
+    : null;
+
+const publicSettings = auth ? null : settingsStore?.getPublicSettings() || null;
+const handler = createRequestHandler({ settingsStore, auth, apiBase });
 const server = http.createServer(handler);
 
 server.on("error", (error) => {
@@ -80,16 +141,32 @@ server.listen(port, host, () => {
   console.log("  CloudVMController");
   console.log(`  Local:   http://${displayHost}:${port}`);
   console.log(`  API:     ${apiBase}`);
+  if (auth) {
+    console.log("  Auth:    GitHub App");
+    console.log("  Vault:   locked (unlock in the browser)");
+    if (!authConfig.allowAnyUser) {
+      const users = authConfig.allowedUsers.join(", ");
+      const ids = authConfig.allowedUserIds.join(", ");
+      console.log(
+        `  Allowed: ${[users && `users ${users}`, ids && `ids ${ids}`]
+          .filter(Boolean)
+          .join("; ")}`,
+      );
+    }
+  } else if (publicSettings) {
+    console.log(
+      `  Token:   ${
+        publicSettings.credentialSource === "none"
+          ? "not configured"
+          : publicSettings.poolSize > 1
+            ? `${publicSettings.poolSize} tokens (multi-account)`
+            : publicSettings.credentialLabel
+      }`,
+    );
+  }
   console.log(
-    `  Token:   ${
-      publicSettings.credentialSource === "none"
-        ? "not configured"
-        : publicSettings.poolSize > 1
-          ? `${publicSettings.poolSize} tokens (multi-account)`
-          : publicSettings.credentialLabel
-    }`,
+    `  Data:    ${auth ? `${dataDir} (local import source only)` : dataDir}`,
   );
-  console.log(`  Data:    ${dataDir}`);
   console.log("");
 });
 

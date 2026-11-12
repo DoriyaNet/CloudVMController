@@ -8,11 +8,13 @@ param(
     [switch]$NoOpen,
     [switch]$Follow,
     [int]$Tail = 40,
-    [string]$Proxy = ""
+    [string]$Proxy = "",
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$EnvArguments = @()
 )
 
 $ErrorActionPreference = "Stop"
-$ScriptVersion = "1.0.0"
+$ScriptVersion = "1.1.0"
 
 function Write-Info {
     param([string]$Message)
@@ -127,20 +129,338 @@ function Get-EnvFileValue {
     if (-not (Test-Path -LiteralPath $Path)) {
         return ""
     }
-    foreach ($line in Get-Content -LiteralPath $Path) {
-        $trimmed = $line.Trim()
-        if ($trimmed.StartsWith("#")) {
-            continue
-        }
-        if ($trimmed -match "^$([regex]::Escape($Name))\s*=\s*(.*)$") {
+    $lines = @(Get-Content -LiteralPath $Path)
+    $pattern = "^\s*" + [regex]::Escape($Name) + "\s*=\s*(.*)$"
+    for ($index = 0; $index -lt $lines.Count; $index += 1) {
+        $line = [string]$lines[$index]
+        if ($line -match $pattern) {
             $value = $matches[1].Trim()
-            if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
-                $value = $value.Substring(1, $value.Length - 2)
+            if ($value.Length -gt 0) {
+                $quote = [string]$value[0]
+                $quoted = $quote -eq '"' -or $quote -eq "'"
+                if ($quoted -and -not ($value.Length -gt 1 -and $value.EndsWith($quote))) {
+                    $parts = New-Object System.Collections.Generic.List[string]
+                    [void]$parts.Add($value.Substring(1))
+                    while ($index + 1 -lt $lines.Count) {
+                        $index += 1
+                        $nextLine = [string]$lines[$index]
+                        if ($nextLine.EndsWith($quote)) {
+                            [void]$parts.Add($nextLine.Substring(0, $nextLine.Length - 1))
+                            break
+                        }
+                        [void]$parts.Add($nextLine)
+                    }
+                    return ($parts -join "`n").Trim()
+                }
+                if ($quoted -and $value.Length -gt 1 -and $value.EndsWith($quote)) {
+                    return $value.Substring(1, $value.Length - 2)
+                }
             }
             return $value
         }
     }
     return ""
+}
+
+function Get-EnvQuoteState {
+    param([string]$Line)
+    $separator = $Line.IndexOf("=")
+    if ($separator -lt 0) {
+        return [pscustomobject]@{ Multiline = $false; Quote = "" }
+    }
+    $value = $Line.Substring($separator + 1).Trim()
+    if ($value.Length -gt 0) {
+        $quote = [string]$value[0]
+        if (($quote -eq '"' -or $quote -eq "'") -and -not ($value.Length -gt 1 -and $value.EndsWith($quote))) {
+            return [pscustomobject]@{ Multiline = $true; Quote = $quote }
+        }
+    }
+    return [pscustomobject]@{ Multiline = $false; Quote = "" }
+}
+
+function Test-EnvKeyName {
+    param([string]$Name)
+    if ($Name -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
+        throw "无效的环境变量名：$Name"
+    }
+}
+
+function Resolve-EnvInput {
+    param([string]$Value)
+    if ($Value.StartsWith("@")) {
+        $filePath = $Value.Substring(1)
+        if (Test-Path -LiteralPath $filePath -PathType Leaf) {
+            $text = [System.IO.File]::ReadAllText([System.IO.Path]::GetFullPath($filePath))
+            $text = $text.TrimEnd([char[]]"`r`n")
+            $text = $text.Replace("`r`n", "`n").Replace("`r", "`n")
+            return $text.Replace("`n", "\n")
+        }
+    }
+    if ($Value.Contains("`r") -or $Value.Contains("`n")) {
+        throw "值包含换行。请先把内容保存到文件，再使用 KEY=@/path/to/file。"
+    }
+    return $Value
+}
+
+function Set-EnvEntry {
+    param(
+        [string]$Path,
+        [string]$Name,
+        [string]$Value
+    )
+    $lines = @()
+    if (Test-Path -LiteralPath $Path) {
+        $lines = @(Get-Content -LiteralPath $Path)
+    }
+    $pattern = "^\s*" + [regex]::Escape($Name) + "\s*="
+    $result = New-Object System.Collections.Generic.List[string]
+    $written = $false
+    $skipping = $false
+    $quote = ""
+    foreach ($line in $lines) {
+        if ($skipping) {
+            $end = ([string]$line).TrimEnd([char]13)
+            if ($end.EndsWith($quote)) {
+                $skipping = $false
+            }
+            continue
+        }
+        if ($line -match $pattern) {
+            if (-not $written) {
+                [void]$result.Add("$Name=$Value")
+                $written = $true
+            }
+            $state = Get-EnvQuoteState -Line ([string]$line)
+            if ($state.Multiline) {
+                $skipping = $true
+                $quote = [string]$state.Quote
+            }
+            continue
+        }
+        [void]$result.Add([string]$line)
+    }
+    if (-not $written) {
+        [void]$result.Add("$Name=$Value")
+    }
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllLines([System.IO.Path]::GetFullPath($Path), $result, $utf8)
+}
+
+function Remove-EnvEntry {
+    param(
+        [string]$Path,
+        [string]$Name
+    )
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return 0
+    }
+    $pattern = "^\s*" + [regex]::Escape($Name) + "\s*="
+    $result = New-Object System.Collections.Generic.List[string]
+    $removed = 0
+    $skipping = $false
+    $quote = ""
+    foreach ($line in @(Get-Content -LiteralPath $Path)) {
+        if ($skipping) {
+            $end = ([string]$line).TrimEnd([char]13)
+            if ($end.EndsWith($quote)) {
+                $skipping = $false
+            }
+            continue
+        }
+        if ($line -match $pattern) {
+            $removed += 1
+            $state = Get-EnvQuoteState -Line ([string]$line)
+            if ($state.Multiline) {
+                $skipping = $true
+                $quote = [string]$state.Quote
+            }
+            continue
+        }
+        [void]$result.Add([string]$line)
+    }
+    if ($removed -gt 0) {
+        $utf8 = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllLines([System.IO.Path]::GetFullPath($Path), $result, $utf8)
+    }
+    return $removed
+}
+
+function Show-EnvList {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "未找到 .env：$Path"
+    }
+    $skipping = $false
+    $quote = ""
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        if ($skipping) {
+            $end = ([string]$line).TrimEnd([char]13)
+            if ($end.EndsWith($quote)) {
+                $skipping = $false
+            }
+            continue
+        }
+        if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=') {
+            $name = $matches[1]
+            if ($name -match '(?i)(SECRET|TOKEN|PASSWORD|PRIVATE_KEY|PROXY)') {
+                Write-Output "$name=***"
+            } else {
+                Write-Output $line
+            }
+            $state = Get-EnvQuoteState -Line ([string]$line)
+            if ($state.Multiline) {
+                $skipping = $true
+                $quote = [string]$state.Quote
+            }
+        }
+    }
+}
+
+function Get-EnvEntry {
+    param(
+        [string]$Path,
+        [string]$Name
+    )
+    $found = $false
+    if (Test-Path -LiteralPath $Path) {
+        foreach ($line in Get-Content -LiteralPath $Path) {
+            if ($line -match ("^\s*" + [regex]::Escape($Name) + "\s*=")) {
+                $found = $true
+                break
+            }
+        }
+    }
+    if (-not $found) {
+        throw "$Name 未设置。"
+    }
+    return Get-EnvFileValue -Path $Path -Name $Name
+}
+
+function Show-EnvHelp {
+    Write-Host @'
+管理 .env 配置
+
+用法：
+  cloudvm env list
+  cloudvm env get <KEY>
+  cloudvm env set <KEY=VALUE> [KEY=VALUE ...]
+  cloudvm env set <KEY> <VALUE>
+  cloudvm env set <KEY>=@<FILE>
+  cloudvm env unset <KEY> [KEY ...]
+
+说明：
+  - 修改后需要执行 cloudvm restart 才会生效。
+  - list 会隐藏 SECRET、TOKEN、PASSWORD、PRIVATE_KEY、PROXY 的值。
+  - 多行内容（例如 PEM）可保存为文件后用 KEY=@C:\path\to\file 写入。
+'@
+}
+
+function Invoke-EnvCommand {
+    param(
+        [pscustomobject]$Config,
+        [string[]]$Arguments
+    )
+    $envPath = Join-Path $Config.appDir ".env"
+    $action = "list"
+    $rest = @()
+    if ($Arguments -and $Arguments.Count -gt 0) {
+        $action = [string]$Arguments[0]
+        if ($Arguments.Count -gt 1) {
+            $rest = @($Arguments[1..($Arguments.Count - 1)])
+        }
+    }
+    switch ($action.ToLowerInvariant()) {
+        "list" {
+            Show-EnvList -Path $envPath
+            break
+        }
+        "ls" {
+            Show-EnvList -Path $envPath
+            break
+        }
+        "get" {
+            if ($rest.Count -ne 1) {
+                throw "用法：cloudvm env get <KEY>"
+            }
+            Get-EnvEntry -Path $envPath -Name ([string]$rest[0])
+            break
+        }
+        "set" {
+            if ($rest.Count -eq 0) {
+                throw "用法：cloudvm env set <KEY=VALUE> [KEY=VALUE ...]"
+            }
+            $assignments = New-Object System.Collections.Generic.List[string]
+            $index = 0
+            while ($index -lt $rest.Count) {
+                $token = [string]$rest[$index]
+                if ($token.Contains("=")) {
+                    [void]$assignments.Add($token)
+                    $index += 1
+                } else {
+                    if ($index + 1 -ge $rest.Count) {
+                        throw "用法：cloudvm env set <KEY=VALUE> [KEY=VALUE ...]"
+                    }
+                    [void]$assignments.Add($token + "=" + [string]$rest[$index + 1])
+                    $index += 2
+                }
+            }
+            foreach ($assignment in $assignments) {
+                $separator = $assignment.IndexOf("=")
+                $name = $assignment.Substring(0, $separator)
+                $value = $assignment.Substring($separator + 1)
+                Test-EnvKeyName -Name $name
+                $value = Resolve-EnvInput -Value $value
+                Set-EnvEntry -Path $envPath -Name $name -Value $value
+                Write-Success "$name 已更新。"
+            }
+            Write-Host "配置文件：$envPath"
+            if (Get-RunningProcess) {
+                Write-Info "服务正在运行，重启后生效：cloudvm restart"
+            }
+            break
+        }
+        "unset" {
+            if ($rest.Count -lt 1) {
+                throw "用法：cloudvm env unset <KEY> [KEY ...]"
+            }
+            foreach ($name in $rest) {
+                Test-EnvKeyName -Name ([string]$name)
+                $removed = Remove-EnvEntry -Path $envPath -Name ([string]$name)
+                if ($removed -eq 0) {
+                    Write-Info "$name 未设置。"
+                } else {
+                    Write-Success "$name 已删除。"
+                }
+            }
+            if (Get-RunningProcess) {
+                Write-Info "服务正在运行，重启后生效：cloudvm restart"
+            }
+            break
+        }
+        "remove" {
+            Invoke-EnvCommand -Config $Config -Arguments (@("unset") + $rest)
+            break
+        }
+        "rm" {
+            Invoke-EnvCommand -Config $Config -Arguments (@("unset") + $rest)
+            break
+        }
+        "help" {
+            Show-EnvHelp
+            break
+        }
+        "-h" {
+            Show-EnvHelp
+            break
+        }
+        "--help" {
+            Show-EnvHelp
+            break
+        }
+        default {
+            throw "未知 env 命令：$action"
+        }
+    }
 }
 
 function Get-AppPort {
@@ -333,16 +653,10 @@ function Open-App {
 }
 
 function Start-App {
-    param(
-        [pscustomobject]$Config,
-        [switch]$SkipOpen
-    )
+    param([pscustomobject]$Config)
     $url = Get-AppUrl -Config $Config
     if (Test-AppHealth -Config $Config) {
         Write-Success "CloudVMController 已在运行：$url"
-        if (-not $SkipOpen) {
-            Open-App -Config $Config
-        }
         return
     }
 
@@ -371,9 +685,6 @@ function Start-App {
         if (Test-AppHealth -Config $Config) {
             Write-Success "CloudVMController 已启动：$url"
             Write-Host "日志：$logDir"
-            if (-not $SkipOpen) {
-                Open-App -Config $Config
-            }
             return
         }
     }
@@ -471,7 +782,7 @@ function Copy-AppFiles {
         [string]$SourceRoot,
         [string]$TargetRoot
     )
-    $directories = @("public", "server", "tests", "scripts")
+    $directories = @("public", "server", "tests", "scripts", "docs")
     foreach ($directory in $directories) {
         $source = Join-Path $SourceRoot $directory
         if (-not (Test-Path -LiteralPath $source)) {
@@ -643,22 +954,29 @@ CloudVMController 命令行
   cloudvm [命令] [选项]
 
 命令：
-  start            启动服务并打开浏览器（默认）
+  start            启动服务（默认，不打开浏览器）
   stop             停止由 cloudvm 启动的服务
   restart          重启服务
   status           查看运行状态
-  open             打开 Web 界面
+  open             在桌面环境中打开 Web 界面
   logs             查看日志，-Follow 持续输出，-Tail N 指定行数
   update           更新软件并重新安装依赖
   update-script    从 GitHub 更新 cloudvm 脚本
+  env              查看或修改 .env 配置
   version          查看版本
   help             显示帮助
 
 选项：
-  -NoOpen          启动时不打开浏览器
   -NoRestart       更新后不自动重启
   -Force           更新时强制覆盖本地修改
   -Proxy <url>     GitHub 下载代理，例如 http://127.0.0.1:7890
+
+环境变量：
+  cloudvm env list
+  cloudvm env get PORT
+  cloudvm env set HOST=0.0.0.0 PORT=8080
+  cloudvm env set GITHUB_APP_PRIVATE_KEY=@C:\path\to\key.pem
+  cloudvm env unset PORT
 "@
 }
 
@@ -666,7 +984,7 @@ try {
     $config = Read-CloudVmConfig
     switch ($Command.ToLowerInvariant()) {
         "start" {
-            Start-App -Config $config -SkipOpen:$NoOpen
+            Start-App -Config $config
             break
         }
         "stop" {
@@ -675,7 +993,7 @@ try {
         }
         "restart" {
             Stop-App -Config $config
-            Start-App -Config $config -SkipOpen:$NoOpen
+            Start-App -Config $config
             break
         }
         "open" {
@@ -699,6 +1017,10 @@ try {
         }
         "update-script" {
             Update-Script -Config $config
+            break
+        }
+        "env" {
+            Invoke-EnvCommand -Config $config -Arguments $EnvArguments
             break
         }
         "version" {

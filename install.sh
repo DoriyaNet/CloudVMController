@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="1.0.0"
+INSTALLER_VERSION="1.1.0"
 REPOSITORY="DoriyaNet/CloudVMController"
 BRANCH="main"
 INSTALL_DIR=""
@@ -10,6 +10,7 @@ NO_PATH=0
 SKIP_DEPS=0
 FORCE=0
 PROXY="${CLOUDVM_PROXY:-}"
+ENV_ASSIGNMENTS=()
 
 info() {
     printf '\033[36m%s\033[0m\n' "$*"
@@ -39,7 +40,9 @@ CloudVMController Linux 安装脚本
   -d, --install-dir <path>   自定义安装目录
       --branch <name>        Git 分支，默认 main
       --repo <owner/repo>    GitHub 仓库，默认 DoriyaNet/CloudVMController
-      --no-launch            安装完成后不启动服务
+  -e, --env <KEY=VALUE>      写入或覆盖 .env 配置项，可重复
+      --no-start             安装完成后不启动服务
+      --no-launch            同 --no-start（兼容保留）
       --no-path              不修改 shell 启动文件
       --skip-deps            跳过 npm 依赖安装
       --force                下载失败时不回退到已有安装
@@ -65,7 +68,16 @@ while [[ $# -gt 0 ]]; do
             REPOSITORY="$2"
             shift 2
             ;;
-        --no-launch)
+        -e|--env|--set-env)
+            [[ $# -ge 2 ]] || die "缺少 KEY=VALUE 参数"
+            ENV_ASSIGNMENTS+=("$2")
+            shift 2
+            ;;
+        --env=*|--set-env=*)
+            ENV_ASSIGNMENTS+=("${1#*=}")
+            shift
+            ;;
+        --no-start|--no-launch)
             NO_LAUNCH=1
             shift
             ;;
@@ -168,7 +180,7 @@ copy_app_files() {
     local directory
     local file
     mkdir -p "$target"
-    for directory in public server tests scripts; do
+    for directory in public server tests scripts docs; do
         if [[ -d "$source/$directory" ]]; then
             rm -rf "$target/$directory"
             cp -a "$source/$directory" "$target/$directory"
@@ -179,6 +191,15 @@ copy_app_files() {
             cp -f "$source/$file" "$target/$file"
         fi
     done
+}
+
+ensure_env_file() {
+    local target="$1"
+    if [[ ! -f "$target/.env" && -f "$target/.env.example" ]]; then
+        cp -f "$target/.env.example" "$target/.env"
+        chmod 0600 "$target/.env" 2>/dev/null || true
+        info "已创建 .env，可从 .env.example 中查看 GitHub App 配置项。"
+    fi
 }
 
 install_app_archive() {
@@ -485,6 +506,12 @@ install_dependencies
 install_launcher
 install_installer_copy
 write_config
+ensure_env_file "$TARGET_DIR"
+
+if [[ ${#ENV_ASSIGNMENTS[@]} -gt 0 ]]; then
+    info "写入 .env 配置..."
+    CLOUDVM_CONFIG="$CONFIG_FILE" bash "$LAUNCHER_DIR/cloudvm.sh" env set "${ENV_ASSIGNMENTS[@]}"
+fi
 
 if [[ "$NO_PATH" -eq 0 ]]; then
     configure_path
@@ -494,13 +521,17 @@ printf '\n'
 success "安装完成。"
 printf '安装目录：%s\n' "$TARGET_DIR"
 printf '配置目录：%s\n' "$(dirname "$CONFIG_FILE")"
+printf '环境文件：%s\n' "$TARGET_DIR/.env"
 printf '快捷指令：%s\n' "$BIN_DIR/cloudvm"
 printf '日志目录：%s\n' "$CLOUDVM_HOME/logs"
 printf '\n可用命令：\n'
-printf '  cloudvm                启动并打开浏览器\n'
+printf '  cloudvm start          启动服务（不打开浏览器）\n'
+printf '  cloudvm open           在桌面环境中打开 Web 界面\n'
 printf '  cloudvm status         查看状态\n'
 printf '  cloudvm stop           停止服务\n'
 printf '  cloudvm logs           查看日志\n'
+printf '  cloudvm env list       查看 .env 配置\n'
+printf '  cloudvm env set K=V    修改 .env 配置\n'
 printf '  cloudvm update         更新软件\n'
 printf '  cloudvm update-script  更新 cloudvm 脚本\n'
 

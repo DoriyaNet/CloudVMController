@@ -1,9 +1,7 @@
 import {
   createCipheriv,
   createDecipheriv,
-  createHash,
   randomBytes,
-  randomUUID,
 } from "node:crypto";
 import {
   chmodSync,
@@ -15,34 +13,14 @@ import {
 } from "node:fs";
 import path from "node:path";
 
-const CONFIG_VERSION = 2;
-const DEFAULT_PROXY = {
-  enabled: false,
-  url: "socks5h://127.0.0.1:7890",
-  username: "",
-  password: null,
-  updatedAt: null,
-};
-
-export class SettingsStoreError extends Error {
-  constructor(code, message, status = 400) {
-    super(message);
-    this.name = "SettingsStoreError";
-    this.code = code;
-    this.status = status;
-  }
-}
-
-function defaultState() {
-  return {
-    version: CONFIG_VERSION,
-    activeTokenId: null,
-    tokens: [],
-    oracleAccounts: [],
-    proxy: { ...DEFAULT_PROXY },
-    updatedAt: null,
-  };
-}
+import {
+  DEFAULT_PROXY,
+  SettingsStoreCore,
+  SettingsStoreError,
+  createDefaultState,
+  maskToken,
+  normalizePlainState,
+} from "./settings-core.js";
 
 function ensurePrivateMode(filePath) {
   try {
@@ -118,79 +96,33 @@ function decrypt(encrypted, key) {
   }
 }
 
-function tokenFingerprint(token) {
-  return createHash("sha256").update(token).digest("hex");
-}
-
-function maskToken(token) {
-  const value = String(token || "");
-  return `••••••••${value.slice(-4)}`;
-}
-
-function normalizeLabel(label, fallback = "Linode 令牌") {
-  const value = String(label || "").trim();
-  return (value || fallback).slice(0, 64);
-}
-
-function normalizeProxyUrl(value) {
-  return String(value || "").trim();
-}
-
-function publicProxyUrl(value) {
-  try {
-    const url = new URL(String(value || ""));
-    url.username = "";
-    url.password = "";
-    return url.toString().replace(/\/$/, "");
-  } catch {
-    return String(value || "");
+function deserializeLocalState(parsed, key) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new SettingsStoreError(
+      "INVALID_SETTINGS_FILE",
+      "data/settings.json must contain a JSON object.",
+      500,
+    );
   }
-}
-
-export class SettingsStore {
-  constructor({ dataDir, envToken = "" }) {
-    this.dataDir = path.resolve(dataDir);
-    this.settingsPath = path.join(this.dataDir, "settings.json");
-    this.keyPath = path.join(this.dataDir, ".key");
-    this.envToken = String(envToken || "").trim();
-    this.key = null;
-    this.state = defaultState();
-    this.load();
-  }
-
-  load() {
-    mkdirSync(this.dataDir, { recursive: true, mode: 0o700 });
-    this.key = readOrCreateKey(this.keyPath);
-
-    if (!existsSync(this.settingsPath)) {
-      this.save();
-      return;
-    }
-
-    let parsed;
-    try {
-      parsed = JSON.parse(readFileSync(this.settingsPath, "utf8"));
-    } catch {
-      throw new SettingsStoreError(
-        "INVALID_SETTINGS_FILE",
-        "data/settings.json is not valid JSON. Fix or remove it before starting CloudVMController.",
-        500,
-      );
-    }
-
-    const state = defaultState();
-    state.activeTokenId =
-      typeof parsed.activeTokenId === "string" ? parsed.activeTokenId : null;
-    state.tokens = Array.isArray(parsed.tokens)
-      ? parsed.tokens.filter(
+  const state = createDefaultState();
+  state.activeTokenId =
+    typeof parsed.activeTokenId === "string" ? parsed.activeTokenId : null;
+  state.tokens = Array.isArray(parsed.tokens)
+    ? parsed.tokens
+        .filter(
           (token) =>
             token &&
             typeof token.id === "string" &&
             typeof token.encrypted === "string",
         )
-      : [];
-    state.oracleAccounts = Array.isArray(parsed.oracleAccounts)
-      ? parsed.oracleAccounts.filter(
+        .map((token) => ({
+          ...token,
+          token: decrypt(token.encrypted, key),
+        }))
+    : [];
+  state.oracleAccounts = Array.isArray(parsed.oracleAccounts)
+    ? parsed.oracleAccounts
+        .filter(
           (account) =>
             account &&
             typeof account.id === "string" &&
@@ -200,411 +132,112 @@ export class SettingsStore {
             typeof account.fingerprint === "string" &&
             typeof account.region === "string",
         )
-      : [];
-    state.proxy = {
-      ...DEFAULT_PROXY,
-      ...(parsed.proxy && typeof parsed.proxy === "object" ? parsed.proxy : {}),
-    };
-    state.updatedAt = parsed.updatedAt || null;
+        .map((account) => ({
+          ...account,
+          privateKey: decrypt(account.encryptedPrivateKey, key),
+        }))
+    : [];
+  state.proxy = {
+    ...DEFAULT_PROXY,
+    ...(parsed.proxy && typeof parsed.proxy === "object" ? parsed.proxy : {}),
+  };
+  state.proxy.password =
+    typeof parsed.proxy?.password === "string" &&
+    parsed.proxy.password.length > 0
+      ? decrypt(parsed.proxy.password, key)
+      : null;
+  state.updatedAt = parsed.updatedAt || null;
 
-    if (
-      state.activeTokenId &&
-      !state.tokens.some((token) => token.id === state.activeTokenId)
-    ) {
-      state.activeTokenId = state.tokens[0]?.id || null;
-    }
-    this.state = state;
-  }
+  return normalizePlainState(state);
+}
 
-  save() {
-    this.state.updatedAt = new Date().toISOString();
-    const tempPath = `${this.settingsPath}.tmp`;
-    writeFileSync(tempPath, `${JSON.stringify(this.state, null, 2)}\n`, {
-      mode: 0o600,
-    });
-    ensurePrivateMode(tempPath);
-    renameSync(tempPath, this.settingsPath);
-    ensurePrivateMode(this.settingsPath);
-  }
-
-  getActiveTokenRecord() {
-    return (
-      this.state.tokens.find(
-        (token) => token.id === this.state.activeTokenId,
-      ) || null
-    );
-  }
-
-  getCredential() {
-    const record = this.getActiveTokenRecord();
-    if (record) {
-      return {
-        token: decrypt(record.encrypted, this.key),
-        source: "web",
-        label: record.label,
-        tokenId: record.id,
-        accountLabel: record.accountLabel || "",
-        active: true,
-      };
-    }
-    if (this.envToken) {
-      return {
-        token: this.envToken,
-        source: "env",
-        label: "服务端 .env 令牌",
-        tokenId: "env",
-        accountLabel: "",
-        active: true,
-      };
-    }
-    return {
-      token: "",
-      source: "none",
-      label: "",
-      tokenId: null,
-      accountLabel: "",
-      active: false,
-    };
-  }
-
-  getCredentials() {
-    const credentials = this.state.tokens.map((record) => ({
-      token: decrypt(record.encrypted, this.key),
-      source: "web",
-      label: record.label,
-      tokenId: record.id,
-      accountLabel: record.accountLabel || "",
-      active: record.id === this.state.activeTokenId,
-    }));
-
-    if (credentials.length === 0 && this.envToken) {
-      credentials.push({
-        token: this.envToken,
-        source: "env",
-        label: "服务端 .env 令牌",
-        tokenId: "env",
-        accountLabel: "",
-        active: true,
-      });
-    }
-
-    return credentials;
-  }
-
-  getTokenById(id) {
-    const record = this.state.tokens.find((token) => token.id === id);
-    if (!record) {
-      throw new SettingsStoreError(
-        "TOKEN_NOT_FOUND",
-        "The selected API token does not exist.",
-        404,
-      );
-    }
-    return {
+function serializeLocalState(state, key) {
+  return {
+    version: state.version,
+    activeTokenId: state.activeTokenId,
+    tokens: state.tokens.map(({ token, ...record }) => ({
       ...record,
-      token: decrypt(record.encrypted, this.key),
-    };
+      encrypted: encrypt(token, key),
+    })),
+    oracleAccounts: state.oracleAccounts.map(
+      ({ privateKey, ...record }) => ({
+        ...record,
+        encryptedPrivateKey: encrypt(privateKey, key),
+      }),
+    ),
+    proxy: {
+      ...state.proxy,
+      password: state.proxy.password
+        ? encrypt(state.proxy.password, key)
+        : null,
+    },
+    updatedAt: state.updatedAt,
+  };
+}
+
+function writeLocalState(settingsPath, key, state) {
+  const tempPath = `${settingsPath}.tmp`;
+  const serialized = serializeLocalState(state, key);
+  writeFileSync(tempPath, `${JSON.stringify(serialized, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  ensurePrivateMode(tempPath);
+  renameSync(tempPath, settingsPath);
+  ensurePrivateMode(settingsPath);
+}
+
+function loadLocalState(dataDir) {
+  const resolvedDataDir = path.resolve(dataDir);
+  const settingsPath = path.join(resolvedDataDir, "settings.json");
+  const keyPath = path.join(resolvedDataDir, ".key");
+
+  mkdirSync(resolvedDataDir, { recursive: true, mode: 0o700 });
+  const key = readOrCreateKey(keyPath);
+
+  if (!existsSync(settingsPath)) {
+    const state = createDefaultState();
+    state.updatedAt = new Date().toISOString();
+    writeLocalState(settingsPath, key, state);
+    return { resolvedDataDir, settingsPath, keyPath, key, state };
   }
 
-  getPublicSettings() {
-    const credential = this.getCredential();
-    const activeRecord = this.getActiveTokenRecord();
-    const credentials = this.state.tokens.map((token) => ({
-      id: token.id,
-      label: token.label,
-      accountLabel: token.accountLabel || "",
-      source: "web",
-      active: token.id === this.state.activeTokenId,
-    }));
-    if (credentials.length === 0 && this.envToken) {
-      credentials.push({
-        id: "env",
-        label: "服务端 .env 令牌",
-        accountLabel: "",
-        source: "env",
-        active: true,
-      });
-    }
-    const oracleAccounts = this.state.oracleAccounts.map((account) => ({
-      id: account.id,
-      label: account.label,
-      tenancyId: account.tenancyId,
-      userId: account.userId,
-      fingerprint: account.fingerprint,
-      region: account.region,
-      compartmentId: account.compartmentId || "",
-      maskedPrivateKey: account.maskedPrivateKey || "••••••••",
-      createdAt: account.createdAt || null,
-      lastVerifiedAt: account.lastVerifiedAt || null,
-    }));
-
-    return {
-      tokenConfigured: Boolean(credential.token),
-      credentialSource: credential.source,
-      credentialLabel: credential.label,
-      activeTokenId: activeRecord?.id || null,
-      envTokenConfigured: Boolean(this.envToken),
-      poolSize: credentials.length,
-      credentials,
-      tokens: this.state.tokens.map((token) => ({
-        id: token.id,
-        label: token.label,
-        masked: token.masked,
-        accountLabel: token.accountLabel || "",
-        createdAt: token.createdAt || null,
-        lastVerifiedAt: token.lastVerifiedAt || null,
-        active: token.id === this.state.activeTokenId,
-      })),
-      oracleConfigured: oracleAccounts.length > 0,
-      oracleAccounts,
-      proxy: {
-        enabled: this.state.proxy.enabled === true,
-        url: publicProxyUrl(this.state.proxy.url || DEFAULT_PROXY.url),
-        username: this.state.proxy.username || "",
-        hasPassword: Boolean(this.state.proxy.password),
-        updatedAt: this.state.proxy.updatedAt || null,
-      },
-    };
-  }
-
-  getProxyConfig() {
-    return {
-      enabled: this.state.proxy.enabled === true,
-      url: this.state.proxy.url || DEFAULT_PROXY.url,
-      username: this.state.proxy.username || "",
-      password: this.state.proxy.password
-        ? decrypt(this.state.proxy.password, this.key)
-        : "",
-    };
-  }
-
-  getEnvToken() {
-    return this.envToken;
-  }
-
-  getOracleAccounts() {
-    return this.state.oracleAccounts.map((account) => ({
-      id: account.id,
-      label: account.label,
-      tenancyId: account.tenancyId,
-      userId: account.userId,
-      fingerprint: account.fingerprint,
-      region: account.region,
-      compartmentId: account.compartmentId || "",
-      privateKey: decrypt(account.encryptedPrivateKey, this.key),
-      createdAt: account.createdAt || null,
-      lastVerifiedAt: account.lastVerifiedAt || null,
-    }));
-  }
-
-  getOracleAccountById(id) {
-    const account = this.state.oracleAccounts.find((entry) => entry.id === id);
-    if (!account) {
-      throw new SettingsStoreError(
-        "ORACLE_ACCOUNT_NOT_FOUND",
-        "The selected Oracle Cloud account does not exist.",
-        404,
-      );
-    }
-    return {
-      id: account.id,
-      label: account.label,
-      tenancyId: account.tenancyId,
-      userId: account.userId,
-      fingerprint: account.fingerprint,
-      region: account.region,
-      compartmentId: account.compartmentId || "",
-      privateKey: decrypt(account.encryptedPrivateKey, this.key),
-      createdAt: account.createdAt || null,
-      lastVerifiedAt: account.lastVerifiedAt || null,
-    };
-  }
-
-  addOracleAccount({
-    label,
-    tenancyId,
-    userId,
-    fingerprint,
-    region,
-    compartmentId = "",
-    privateKey,
-    accountLabel = "",
-  }) {
-    const value = String(privateKey || "").trim();
-    if (!value) {
-      throw new SettingsStoreError(
-        "ORACLE_PRIVATE_KEY_REQUIRED",
-        "An Oracle API private key is required.",
-        400,
-      );
-    }
-    if (value.length > 32_768) {
-      throw new SettingsStoreError(
-        "ORACLE_PRIVATE_KEY_TOO_LONG",
-        "The Oracle API private key is too long.",
-        400,
-      );
-    }
-
-    const identity = `${tenancyId}\n${userId}\n${fingerprint}`;
-    const fingerprintHash = tokenFingerprint(identity);
-    if (
-      this.state.oracleAccounts.some(
-        (entry) => entry.identityFingerprint === fingerprintHash,
-      )
-    ) {
-      throw new SettingsStoreError(
-        "DUPLICATE_ORACLE_ACCOUNT",
-        "This Oracle Cloud account is already saved.",
-        409,
-      );
-    }
-
-    const record = {
-      id: randomUUID(),
-      label: normalizeLabel(
-        label,
-        accountLabel || `Oracle · ${region || "OCI"}`,
-      ),
-      tenancyId: String(tenancyId || "").slice(0, 512),
-      userId: String(userId || "").slice(0, 512),
-      fingerprint: String(fingerprint || "").slice(0, 64),
-      region: String(region || "").slice(0, 64),
-      compartmentId: String(compartmentId || "").slice(0, 512),
-      maskedPrivateKey: "•••••••• RSA KEY",
-      identityFingerprint: fingerprintHash,
-      encryptedPrivateKey: encrypt(value, this.key),
-      createdAt: new Date().toISOString(),
-      lastVerifiedAt: new Date().toISOString(),
-    };
-    this.state.oracleAccounts.unshift(record);
-    this.save();
-    return record.id;
-  }
-
-  removeOracleAccount(id) {
-    const before = this.state.oracleAccounts.length;
-    this.state.oracleAccounts = this.state.oracleAccounts.filter(
-      (account) => account.id !== id,
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(settingsPath, "utf8"));
+  } catch {
+    throw new SettingsStoreError(
+      "INVALID_SETTINGS_FILE",
+      "data/settings.json is not valid JSON. Fix or remove it before starting CloudVMController.",
+      500,
     );
-    if (this.state.oracleAccounts.length === before) {
-      throw new SettingsStoreError(
-        "ORACLE_ACCOUNT_NOT_FOUND",
-        "The selected Oracle Cloud account does not exist.",
-        404,
-      );
-    }
-    this.save();
   }
 
-  recordOracleVerification(id) {
-    const account = this.state.oracleAccounts.find((entry) => entry.id === id);
-    if (!account) {
-      return;
-    }
-    account.lastVerifiedAt = new Date().toISOString();
-    this.save();
-  }
+  const state = deserializeLocalState(parsed, key);
+  return { resolvedDataDir, settingsPath, keyPath, key, state };
+}
 
-  addToken({ label, token, accountLabel = "" }) {
-    const value = String(token || "").trim();
-    if (!value) {
-      throw new SettingsStoreError(
-        "TOKEN_REQUIRED",
-        "An API token is required.",
-        400,
-      );
-    }
-    if (value.length > 512) {
-      throw new SettingsStoreError(
-        "TOKEN_TOO_LONG",
-        "The API token is too long.",
-        400,
-      );
-    }
-
-    const fingerprint = tokenFingerprint(value);
-    if (
-      this.state.tokens.some((entry) => entry.fingerprint === fingerprint)
-    ) {
-      throw new SettingsStoreError(
-        "DUPLICATE_TOKEN",
-        "This API token is already saved.",
-        409,
-      );
-    }
-
-    const record = {
-      id: randomUUID(),
-      label: normalizeLabel(label, accountLabel),
-      accountLabel: String(accountLabel || "").slice(0, 128),
-      masked: maskToken(value),
-      fingerprint,
-      encrypted: encrypt(value, this.key),
-      createdAt: new Date().toISOString(),
-      lastVerifiedAt: new Date().toISOString(),
-    };
-    this.state.tokens.unshift(record);
-    if (!this.state.activeTokenId) {
-      this.state.activeTokenId = record.id;
-    }
-    this.save();
-    return record.id;
-  }
-
-  activateToken(id) {
-    if (!this.state.tokens.some((token) => token.id === id)) {
-      throw new SettingsStoreError(
-        "TOKEN_NOT_FOUND",
-        "The selected API token does not exist.",
-        404,
-      );
-    }
-    this.state.activeTokenId = id;
-    this.save();
-  }
-
-  removeToken(id) {
-    const before = this.state.tokens.length;
-    this.state.tokens = this.state.tokens.filter((token) => token.id !== id);
-    if (this.state.tokens.length === before) {
-      throw new SettingsStoreError(
-        "TOKEN_NOT_FOUND",
-        "The selected API token does not exist.",
-        404,
-      );
-    }
-    if (this.state.activeTokenId === id) {
-      this.state.activeTokenId = this.state.tokens[0]?.id || null;
-    }
-    this.save();
-  }
-
-  recordVerification(id, { accountLabel = "" } = {}) {
-    const record = this.state.tokens.find((token) => token.id === id);
-    if (!record) {
-      return;
-    }
-    if (accountLabel) {
-      record.accountLabel = String(accountLabel).slice(0, 128);
-    }
-    record.lastVerifiedAt = new Date().toISOString();
-    this.save();
-  }
-
-  updateProxy({ enabled, url, username, password }) {
-    this.state.proxy = {
-      ...this.state.proxy,
-      enabled: enabled === true,
-      url: normalizeProxyUrl(url) || DEFAULT_PROXY.url,
-      username: String(username || "").trim().slice(0, 128),
-      updatedAt: new Date().toISOString(),
+export class SettingsStore extends SettingsStoreCore {
+  constructor({ dataDir, envToken = "" }) {
+    const loaded = loadLocalState(dataDir);
+    const persist = async (state) => {
+      writeLocalState(loaded.settingsPath, loaded.key, state);
     };
 
-    if (typeof password === "string" && password.length > 0) {
-      this.state.proxy.password = encrypt(password, this.key);
-    }
-    this.save();
+    super({
+      state: loaded.state,
+      envToken,
+      persist,
+    });
+
+    this.dataDir = loaded.resolvedDataDir;
+    this.settingsPath = loaded.settingsPath;
+    this.keyPath = loaded.keyPath;
+    this.key = loaded.key;
+  }
+
+  async save() {
+    this.state.updatedAt = new Date().toISOString();
+    await this.persist(this.state);
   }
 }
 
@@ -612,4 +245,4 @@ export function openSettingsStore({ dataDir, envToken = "" }) {
   return new SettingsStore({ dataDir, envToken });
 }
 
-export { DEFAULT_PROXY, maskToken };
+export { DEFAULT_PROXY, SettingsStoreError, maskToken };

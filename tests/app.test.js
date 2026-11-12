@@ -13,6 +13,7 @@ import {
   renderCreateUnavailable,
   renderDrawer,
   renderIpRenewModal,
+  renderIpv6BindModal,
   renderIpSwapModal,
   renderInstances,
   renderOracleBackupDeleteModal,
@@ -28,6 +29,10 @@ import {
   getOracleRegion,
   oracleRegionGroups,
 } from "../public/js/oracle-regions.js";
+import {
+  buildIpv6BindScripts,
+  ipv6RangeHost,
+} from "../public/js/utils.js";
 import { createMockLinode } from "./helpers/mock-linode.js";
 import { createMockOracle } from "./helpers/mock-oracle.js";
 import { createSocks5Server } from "./helpers/socks5-server.js";
@@ -370,7 +375,7 @@ test("encrypts tokens at rest and can reopen saved settings", async () => {
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "linode-pilot-store-"));
   try {
     const store = openSettingsStore({ dataDir });
-    store.addToken({
+    await store.addToken({
       label: "Encrypted",
       token: "test-linode-token",
       accountLabel: "Test Account",
@@ -1233,6 +1238,7 @@ test("renders the IP swap modal and routed IPv6 ranges in the drawer", () => {
   });
   assert.match(drawer, /data-action="open-ip-swap"/);
   assert.match(drawer, /data-action="open-ip-renew"/);
+  assert.match(drawer, /data-action="open-ipv6-bind"/);
   assert.match(drawer, /2400:8907:aa01::\/64/);
   assert.match(drawer, /IPv6 段/);
   assert.match(drawer, /路由段前缀不能直接 ping/);
@@ -1331,6 +1337,96 @@ test("renders IPv4, IPv6 /56, and unavailable renewal states", () => {
     },
   });
   assert.match(unavailable, /无法执行 IPv4 换新/);
+});
+
+test("builds temporary, permanent, and removal scripts for a routed IPv6 range", () => {
+  assert.deepEqual(ipv6RangeHost("2600:3c15:e001:b3::/64"), {
+    range: "2600:3c15:e001:b3::/64",
+    prefix: 64,
+    hostAddress: "2600:3c15:e001:b3::10",
+    cidr: "2600:3c15:e001:b3::10/64",
+  });
+  assert.equal(
+    ipv6RangeHost("2600:3c15:e001:b3::/56").cidr,
+    "2600:3c15:e001:b3::10/56",
+  );
+  assert.equal(ipv6RangeHost("not-an-ipv6-range"), null);
+
+  const plan = buildIpv6BindScripts({
+    range: "2600:3c15:e001:b3::/64",
+    instanceId: "110258495",
+    allowIcmp: true,
+  });
+  assert.ok(plan);
+  assert.match(
+    plan.temporary,
+    /ip -6 addr replace "\$CIDR" dev "\$IFACE"/,
+  );
+  assert.match(plan.temporary, /2600:3c15:e001:b3::10\/64/);
+  assert.match(plan.temporary, /ip6tables .*ipv6-icmp/);
+  assert.match(plan.permanent, /UNIT_NAME="cloudvm-ipv6-110258495"/);
+  assert.match(plan.permanent, /After=network-online.target/);
+  assert.match(plan.permanent, /systemctl enable --now/);
+  assert.match(plan.permanent, /ip6tables .*ipv6-icmp/);
+  assert.match(plan.remove, /systemctl disable --now/);
+  assert.match(plan.remove, /ip -6 addr del/);
+
+  const withoutIcmp = buildIpv6BindScripts({
+    range: "2600:3c15:e001:b3::/64",
+    instanceId: "110258495",
+    allowIcmp: false,
+  });
+  assert.ok(withoutIcmp);
+  assert.equal(withoutIcmp.temporary.includes("ipv6-icmp"), false);
+  assert.equal(withoutIcmp.permanent.includes("ipv6-icmp"), false);
+});
+
+test("renders the post-swap IPv6 bind helper with copyable scripts", () => {
+  const modal = {
+    type: "ipv6-bind",
+    source: "swap",
+    targets: [
+      {
+        id: "58120442",
+        label: "pilot-edge-01",
+        role: "当前实例",
+        range: "2400:8907:aa01::/64",
+      },
+      {
+        id: "55190332",
+        label: "analytics-db",
+        role: "交换目标",
+        range: "2400:8907:bb02::/64",
+      },
+    ],
+    activeTargetId: "55190332",
+    mode: "temporary",
+    allowIcmp: true,
+  };
+
+  const temporary = renderIpv6BindModal({ modal });
+  assert.match(temporary, /新 IPv6 已就绪/);
+  assert.match(temporary, /analytics-db/);
+  assert.match(temporary, /2400:8907:bb02::10/);
+  assert.match(temporary, /data-action="ipv6-bind-target"/);
+  assert.match(temporary, /data-action="ipv6-bind-mode"/);
+  assert.match(
+    temporary,
+    /data-copy-target="ipv6-bind-script"/,
+  );
+  assert.match(
+    temporary,
+    /id="ipv6-bind-script"[^>]*>[\s\S]*ip -6 addr replace/,
+  );
+  assert.match(temporary, /临时绑定/);
+
+  const permanent = renderIpv6BindModal({
+    modal: { ...modal, mode: "permanent" },
+  });
+  assert.match(permanent, /永久绑定/);
+  assert.match(permanent, /systemctl enable --now/);
+  assert.match(permanent, /撤销永久绑定/);
+  assert.match(permanent, /data-copy-target="ipv6-bind-remove-script"/);
 });
 
 test("verifies Oracle signatures, stores OCI keys encrypted, and controls instances", async (t) => {
