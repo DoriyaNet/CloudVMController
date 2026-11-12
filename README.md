@@ -19,6 +19,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 也可以直接双击 `install.cmd`。脚本会检查 Node.js 20+、安装依赖，并注册 `cloudvm` 快捷指令：
 
 ```powershell
+cloudvm              # 进入交互菜单
 cloudvm start        # 启动服务（不打开浏览器）
 cloudvm open         # 在桌面环境下手动打开 Web 界面
 cloudvm update       # 更新软件
@@ -47,9 +48,10 @@ bash install.sh
 curl -fsSL https://raw.githubusercontent.com/DoriyaNet/CloudVMController/main/install.sh | bash
 ```
 
-脚本会检查 Node.js 20+、安装依赖，并把 `cloudvm` 安装到 `~/.local/bin`。更新命令与 Windows 相同：
+脚本会检查 Node.js 20+、安装依赖，并把 `cloudvm` 安装到 `~/.local/bin`。常用命令与 Windows 相同：
 
 ```bash
+cloudvm
 cloudvm update
 cloudvm update-script
 ```
@@ -68,9 +70,28 @@ curl -fsSL https://raw.githubusercontent.com/DoriyaNet/CloudVMController/main/in
 
 如果希望由 systemd、supervisor 等进程管理器启动服务，安装时加 `--no-start`（Windows 使用 `-NoStart`），安装完成后配置进程管理器调用 `node server/index.js` 即可。
 
+## 交互菜单
+
+在终端直接运行 `cloudvm`，或执行 `cloudvm menu` / `cloudvm tui`，会进入类似 x-ui 的编号菜单：
+
+```text
+  1) 启动服务
+  2) 停止服务
+  3) 重启服务
+  4) 查看状态
+  5) 查看日志
+  6) 环境变量管理
+  7) 更新软件
+  8) 更新 cloudvm 脚本
+  9) 打开 Web 界面（桌面环境）
+  0) 退出
+```
+
+菜单顶部会显示版本、监听地址、运行状态、安装目录和 `.env` 路径。环境变量子菜单支持查看、修改、新增和删除，输入敏感变量时会隐藏输入内容。非交互环境（例如脚本、定时任务）中直接无参数运行 `cloudvm` 仍按 `cloudvm start` 处理；建议显式写 `cloudvm start`。
+
 ## 环境变量管理
 
-安装后可直接通过 `cloudvm env` 修改 `.env`，不需要手工查找文件：
+安装后可直接通过 `cloudvm` 菜单的「环境变量管理」或 `cloudvm env` 修改 `.env`，不需要手工查找文件：
 
 ```bash
 cloudvm env list

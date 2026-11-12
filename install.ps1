@@ -16,7 +16,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
-$InstallerVersion = "1.1.0"
+$InstallerVersion = "1.2.0"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 function Write-Info {
@@ -462,6 +462,7 @@ Write-Host "快捷指令：$cmdPath"
 Write-Host "更新模式：$installMode"
 Write-Host ""
 Write-Host "可用命令："
+Write-Host "  cloudvm            进入交互菜单"
 Write-Host "  cloudvm start      启动服务（不打开浏览器）"
 Write-Host "  cloudvm open       在桌面环境中打开 Web 界面"
 Write-Host "  cloudvm status     查看状态"

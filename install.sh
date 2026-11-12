@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="1.1.0"
+INSTALLER_VERSION="1.2.0"
 REPOSITORY="DoriyaNet/CloudVMController"
 BRANCH="main"
 INSTALL_DIR=""
@@ -525,6 +525,7 @@ printf '环境文件：%s\n' "$TARGET_DIR/.env"
 printf '快捷指令：%s\n' "$BIN_DIR/cloudvm"
 printf '日志目录：%s\n' "$CLOUDVM_HOME/logs"
 printf '\n可用命令：\n'
+printf '  cloudvm                进入交互菜单\n'
 printf '  cloudvm start          启动服务（不打开浏览器）\n'
 printf '  cloudvm open           在桌面环境中打开 Web 界面\n'
 printf '  cloudvm status         查看状态\n'

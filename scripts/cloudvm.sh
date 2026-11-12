@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 
 CLOUDVM_HOME="${CLOUDVM_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/cloudvmcontroller}"
 CONFIG_FILE="${CLOUDVM_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/cloudvmcontroller/config.env}"
@@ -11,7 +11,7 @@ PID_FILE="$RUN_DIR/cloudvm.pid"
 OUT_LOG="$LOG_DIR/cloudvm.out.log"
 ERR_LOG="$LOG_DIR/cloudvm.err.log"
 
-COMMAND="start"
+COMMAND=""
 COMMAND_SET=0
 FORCE=0
 NO_RESTART=0
@@ -52,9 +52,12 @@ CloudVMController 命令行
 
 用法：
   cloudvm [命令] [选项]
+  cloudvm                 在终端中打开交互菜单
+                          非交互环境等价于 cloudvm start
 
 命令：
-  start            启动服务（默认，不打开浏览器）
+  menu             打开交互菜单（tui 同义）
+  start            启动服务（不打开浏览器）
   stop             停止由 cloudvm 启动的服务
   restart          重启服务
   status           查看运行状态
@@ -125,7 +128,7 @@ while [[ $# -gt 0 ]]; do
             ENV_ARGS=("$@")
             break
             ;;
-        start|stop|restart|status|open|logs|update|update-script|version|help)
+        start|stop|restart|status|open|logs|update|update-script|menu|tui|version|help)
             if [[ "$COMMAND_SET" -eq 1 && "$COMMAND" != "$1" ]]; then
                 die "只能指定一个命令"
             fi
@@ -1001,6 +1004,221 @@ show_version() {
     printf '安装目录：%s\n' "$CLOUDVM_APP_DIR"
 }
 
+menu_clear() {
+    if [[ -t 1 ]]; then
+        printf '\033[H\033[2J'
+    fi
+}
+
+is_sensitive_env_key() {
+    case "$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')" in
+        *SECRET*|*TOKEN*|*PASSWORD*|*PRIVATE_KEY*|*PROXY*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+menu_header() {
+    local pid
+    local state
+    local state_color
+    pid="$(running_pid || true)"
+    if [[ -n "$pid" ]]; then
+        state="运行中（PID $pid）"
+        state_color="32"
+    elif health_check; then
+        state="运行中（非 cloudvm 启动）"
+        state_color="32"
+    else
+        state="已停止"
+        state_color="31"
+    fi
+    printf '\033[1;36m CloudVMController 控制台 \033[0m\n'
+    printf ' 版本    %s\n' "$(app_version)"
+    printf ' CLI     %s\n' "$SCRIPT_VERSION"
+    printf ' 地址    %s\n' "$(app_url)"
+    printf ' 状态    \033[%sm%s\033[0m\n' "$state_color" "$state"
+    printf ' 安装    %s\n' "$CLOUDVM_APP_DIR"
+    printf ' 配置    %s\n' "$APP_ENV_FILE"
+}
+
+menu_pause() {
+    printf '\n'
+    read -rp "按回车返回主菜单..." _ || true
+}
+
+run_menu_action() {
+    menu_clear
+    ( "$@" ) || true
+    menu_pause
+}
+
+menu_restart_app() {
+    stop_app
+    start_app
+}
+
+menu_show_logs() {
+    FOLLOW=0
+    show_logs
+}
+
+menu_open_app() {
+    health_check || die "服务未运行。先执行 cloudvm start。"
+    open_app
+}
+
+env_unset_key() {
+    validate_env_key "$1"
+    unset_env_value "$1"
+}
+
+run_env_action() {
+    menu_clear
+    ( "$@" ) || true
+    printf '\n'
+    read -rp "按回车返回环境变量菜单..." _ || true
+}
+
+env_menu() {
+    local choice
+    local key
+    local value
+    while true; do
+        menu_clear
+        printf '\033[1;36m环境变量管理\033[0m\n\n'
+        printf '配置文件：%s\n\n' "$APP_ENV_FILE"
+        printf '  1) 查看全部（密钥已隐藏）\n'
+        printf '  2) 查看单项\n'
+        printf '  3) 修改 / 新增\n'
+        printf '  4) 删除\n'
+        printf '  0) 返回主菜单\n\n'
+        printf '修改后请返回主菜单选择「重启服务」使配置生效。\n\n'
+        if ! read -rp "请选择操作: " choice; then
+            return 0
+        fi
+        case "$choice" in
+            1)
+                run_env_action list_env
+                ;;
+            2)
+                if ! read -rp "变量名: " key || [[ -z "$key" ]]; then
+                    warn "变量名不能为空。"
+                    sleep 1
+                    continue
+                fi
+                run_env_action get_env "$key"
+                ;;
+            3)
+                if ! read -rp "变量名: " key || [[ -z "$key" ]]; then
+                    warn "变量名不能为空。"
+                    sleep 1
+                    continue
+                fi
+                if is_sensitive_env_key "$key"; then
+                    if ! IFS= read -rsp "值（支持 @文件路径，输入不显示）: " value; then
+                        printf '\n'
+                        continue
+                    fi
+                else
+                    if ! IFS= read -rp "值（支持 @文件路径）: " value; then
+                        continue
+                    fi
+                fi
+                printf '\n'
+                run_env_action set_env "$key=$value"
+                ;;
+            4)
+                if ! read -rp "变量名: " key || [[ -z "$key" ]]; then
+                    warn "变量名不能为空。"
+                    sleep 1
+                    continue
+                fi
+                run_env_action env_unset_key "$key"
+                ;;
+            0|q|Q)
+                return 0
+                ;;
+            *)
+                printf '无效选择。\n'
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+interactive_menu() {
+    local choice
+    if [[ ! -t 0 || ! -t 1 ]]; then
+        die "交互菜单需要终端。可执行 cloudvm help 查看命令。"
+    fi
+    while true; do
+        menu_clear
+        menu_header
+        printf '\n'
+        printf '  1) 启动服务\n'
+        printf '  2) 停止服务\n'
+        printf '  3) 重启服务\n'
+        printf '  4) 查看状态\n'
+        printf '  5) 查看日志\n'
+        printf '  6) 环境变量管理\n'
+        printf '  7) 更新软件\n'
+        printf '  8) 更新 cloudvm 脚本\n'
+        printf '  9) 打开 Web 界面（桌面环境）\n'
+        printf '  0) 退出\n\n'
+        if ! read -rp "请选择操作: " choice; then
+            printf '\n'
+            return 0
+        fi
+        case "$choice" in
+            1)
+                run_menu_action start_app
+                ;;
+            2)
+                run_menu_action stop_app
+                ;;
+            3)
+                run_menu_action menu_restart_app
+                ;;
+            4)
+                run_menu_action show_status
+                ;;
+            5)
+                run_menu_action menu_show_logs
+                ;;
+            6)
+                env_menu
+                ;;
+            7)
+                run_menu_action update_app
+                ;;
+            8)
+                run_menu_action update_script
+                ;;
+            9)
+                run_menu_action menu_open_app
+                ;;
+            0|q|Q)
+                menu_clear
+                return 0
+                ;;
+            *)
+                printf '无效选择。\n'
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+if [[ -z "$COMMAND" ]]; then
+    if [[ -t 0 && -t 1 ]]; then
+        COMMAND="menu"
+    else
+        COMMAND="start"
+    fi
+fi
+
 case "$COMMAND" in
     start)
         start_app
@@ -1027,6 +1245,9 @@ case "$COMMAND" in
         ;;
     update-script)
         update_script
+        ;;
+    menu|tui)
+        interactive_menu
         ;;
     env)
         if [[ ${#ENV_ARGS[@]} -eq 0 ]]; then

@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [string]$Command = "start",
+    [string]$Command = "",
     [switch]$Force,
     [switch]$NoRestart,
     [switch]$NoOpen,
@@ -14,7 +14,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ScriptVersion = "1.1.0"
+$ProgressPreference = "SilentlyContinue"
+$ScriptVersion = "1.2.0"
 
 function Write-Info {
     param([string]$Message)
@@ -946,15 +947,305 @@ function Show-Version {
     Write-Host "安装目录：$($Config.appDir)"
 }
 
+function Clear-MenuScreen {
+    if (-not [Console]::IsOutputRedirected) {
+        Clear-Host
+    }
+}
+
+function Test-SensitiveEnvName {
+    param([string]$Name)
+    return $Name -match '(?i)(SECRET|TOKEN|PASSWORD|PRIVATE_KEY|PROXY)'
+}
+
+function Show-MenuHeader {
+    param([pscustomobject]$Config)
+    $process = Get-RunningProcess
+    if ($process) {
+        $state = "运行中（PID $($process.Id)）"
+        $stateColor = "Green"
+    } elseif (Test-AppHealth -Config $Config) {
+        $state = "运行中（非 cloudvm 启动）"
+        $stateColor = "Green"
+    } else {
+        $state = "已停止"
+        $stateColor = "Red"
+    }
+    Write-Host " CloudVMController 控制台" -ForegroundColor Cyan
+    Write-Host " 版本    $((Get-AppVersion -Config $Config))"
+    Write-Host " CLI     $ScriptVersion"
+    Write-Host " 地址    $(Get-AppUrl -Config $Config)"
+    Write-Host " 状态    $state" -ForegroundColor $stateColor
+    Write-Host " 安装    $($Config.appDir)"
+    Write-Host " 配置    $(Join-Path $Config.appDir '.env')"
+}
+
+function Invoke-MenuStart {
+    param([pscustomobject]$Config)
+    Start-App -Config $Config
+}
+
+function Invoke-MenuStop {
+    param([pscustomobject]$Config)
+    Stop-App -Config $Config
+}
+
+function Invoke-MenuRestart {
+    param([pscustomobject]$Config)
+    Stop-App -Config $Config
+    Start-App -Config $Config
+}
+
+function Invoke-MenuStatus {
+    param([pscustomobject]$Config)
+    Show-Status -Config $Config
+}
+
+function Invoke-MenuLogs {
+    param([pscustomobject]$Config)
+    Show-Logs -Config $Config -LineCount 40
+}
+
+function Invoke-MenuOpen {
+    param([pscustomobject]$Config)
+    if (-not (Test-AppHealth -Config $Config)) {
+        throw "服务未运行。先启动服务。"
+    }
+    Open-App -Config $Config
+}
+
+function Invoke-MenuUpdate {
+    param([pscustomobject]$Config)
+    Update-App -Config $Config
+}
+
+function Invoke-MenuUpdateScript {
+    param([pscustomobject]$Config)
+    Update-Script -Config $Config
+}
+
+function Invoke-MenuEnvList {
+    param([string]$Path)
+    Show-EnvList -Path $Path
+}
+
+function Invoke-MenuEnvGet {
+    param(
+        [string]$Path,
+        [string]$Name
+    )
+    Get-EnvEntry -Path $Path -Name $Name
+}
+
+function Invoke-MenuEnvSet {
+    param(
+        [pscustomobject]$Config,
+        [string]$Name,
+        [string]$Value
+    )
+    Invoke-EnvCommand -Config $Config -Arguments @("set", "$Name=$Value")
+}
+
+function Invoke-MenuEnvUnset {
+    param(
+        [pscustomobject]$Config,
+        [string]$Name
+    )
+    Invoke-EnvCommand -Config $Config -Arguments @("unset", $Name)
+}
+
+function Invoke-MenuAction {
+    param(
+        [string]$Command,
+        [object[]]$Arguments = @(),
+        [string]$PauseMessage = "按回车返回主菜单"
+    )
+    Clear-MenuScreen
+    try {
+        & $Command @Arguments
+    } catch {
+        Write-Host ""
+        Write-Host $_.Exception.Message -ForegroundColor Red
+    }
+    Write-Host ""
+    Read-Host $PauseMessage | Out-Null
+}
+
+function Read-EnvMenuValue {
+    param([string]$Name)
+    if (Test-SensitiveEnvName -Name $Name) {
+        $secure = Read-Host -AsSecureString "值（支持 @文件路径，输入不显示）"
+        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+        try {
+            return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+        } finally {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        }
+    }
+    return Read-Host "值（支持 @文件路径）"
+}
+
+function Show-EnvMenu {
+    param([pscustomobject]$Config)
+    $envPath = Join-Path $Config.appDir ".env"
+    while ($true) {
+        Clear-MenuScreen
+        Write-Host "环境变量管理" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "配置文件：$envPath"
+        Write-Host ""
+        Write-Host "  1) 查看全部（密钥已隐藏）"
+        Write-Host "  2) 查看单项"
+        Write-Host "  3) 修改 / 新增"
+        Write-Host "  4) 删除"
+        Write-Host "  0) 返回主菜单"
+        Write-Host ""
+        Write-Host "修改后请返回主菜单选择「重启服务」使配置生效。" -ForegroundColor DarkGray
+        Write-Host ""
+        $choice = Read-Host "请选择操作"
+        switch ($choice) {
+            "1" {
+                Invoke-MenuAction -Command "Invoke-MenuEnvList" -Arguments @($envPath) -PauseMessage "按回车返回环境变量菜单"
+                break
+            }
+            "2" {
+                $key = Read-Host "变量名"
+                if (-not $key) {
+                    Write-Warn "变量名不能为空。"
+                    Start-Sleep -Seconds 1
+                    break
+                }
+                Invoke-MenuAction -Command "Invoke-MenuEnvGet" -Arguments @($envPath, $key) -PauseMessage "按回车返回环境变量菜单"
+                break
+            }
+            "3" {
+                $key = Read-Host "变量名"
+                if (-not $key) {
+                    Write-Warn "变量名不能为空。"
+                    Start-Sleep -Seconds 1
+                    break
+                }
+                $value = Read-EnvMenuValue -Name $key
+                Invoke-MenuAction -Command "Invoke-MenuEnvSet" -Arguments @($Config, $key, $value) -PauseMessage "按回车返回环境变量菜单"
+                break
+            }
+            "4" {
+                $key = Read-Host "变量名"
+                if (-not $key) {
+                    Write-Warn "变量名不能为空。"
+                    Start-Sleep -Seconds 1
+                    break
+                }
+                Invoke-MenuAction -Command "Invoke-MenuEnvUnset" -Arguments @($Config, $key) -PauseMessage "按回车返回环境变量菜单"
+                break
+            }
+            "0" {
+                return
+            }
+            "q" {
+                return
+            }
+            "Q" {
+                return
+            }
+            default {
+                Write-Host "无效选择。" -ForegroundColor Yellow
+                Start-Sleep -Seconds 1
+            }
+        }
+    }
+}
+
+function Invoke-InteractiveMenu {
+    param([pscustomobject]$Config)
+    if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
+        throw "交互菜单需要终端。可执行 cloudvm help 查看命令。"
+    }
+    while ($true) {
+        Clear-MenuScreen
+        Show-MenuHeader -Config $Config
+        Write-Host ""
+        Write-Host "  1) 启动服务"
+        Write-Host "  2) 停止服务"
+        Write-Host "  3) 重启服务"
+        Write-Host "  4) 查看状态"
+        Write-Host "  5) 查看日志"
+        Write-Host "  6) 环境变量管理"
+        Write-Host "  7) 更新软件"
+        Write-Host "  8) 更新 cloudvm 脚本"
+        Write-Host "  9) 打开 Web 界面（桌面环境）"
+        Write-Host "  0) 退出"
+        Write-Host ""
+        $choice = Read-Host "请选择操作"
+        switch ($choice) {
+            "1" {
+                Invoke-MenuAction -Command "Invoke-MenuStart" -Arguments @($Config)
+                break
+            }
+            "2" {
+                Invoke-MenuAction -Command "Invoke-MenuStop" -Arguments @($Config)
+                break
+            }
+            "3" {
+                Invoke-MenuAction -Command "Invoke-MenuRestart" -Arguments @($Config)
+                break
+            }
+            "4" {
+                Invoke-MenuAction -Command "Invoke-MenuStatus" -Arguments @($Config)
+                break
+            }
+            "5" {
+                Invoke-MenuAction -Command "Invoke-MenuLogs" -Arguments @($Config)
+                break
+            }
+            "6" {
+                Show-EnvMenu -Config $Config
+                break
+            }
+            "7" {
+                Invoke-MenuAction -Command "Invoke-MenuUpdate" -Arguments @($Config)
+                break
+            }
+            "8" {
+                Invoke-MenuAction -Command "Invoke-MenuUpdateScript" -Arguments @($Config)
+                break
+            }
+            "9" {
+                Invoke-MenuAction -Command "Invoke-MenuOpen" -Arguments @($Config)
+                break
+            }
+            "0" {
+                Clear-MenuScreen
+                return
+            }
+            "q" {
+                Clear-MenuScreen
+                return
+            }
+            "Q" {
+                Clear-MenuScreen
+                return
+            }
+            default {
+                Write-Host "无效选择。" -ForegroundColor Yellow
+                Start-Sleep -Seconds 1
+            }
+        }
+    }
+}
+
 function Show-Help {
     Write-Host @"
 CloudVMController 命令行
 
 用法：
   cloudvm [命令] [选项]
+  cloudvm            进入交互菜单
+                     非交互环境等价于 cloudvm start
 
 命令：
-  start            启动服务（默认，不打开浏览器）
+  menu             打开交互菜单（tui 同义）
+  start            启动服务（不打开浏览器）
   stop             停止由 cloudvm 启动的服务
   restart          重启服务
   status           查看运行状态
@@ -982,7 +1273,15 @@ CloudVMController 命令行
 
 try {
     $config = Read-CloudVmConfig
-    switch ($Command.ToLowerInvariant()) {
+    $commandName = $Command.Trim()
+    if (-not $commandName) {
+        if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
+            $commandName = "start"
+        } else {
+            $commandName = "menu"
+        }
+    }
+    switch ($commandName.ToLowerInvariant()) {
         "start" {
             Start-App -Config $config
             break
@@ -1017,6 +1316,14 @@ try {
         }
         "update-script" {
             Update-Script -Config $config
+            break
+        }
+        "menu" {
+            Invoke-InteractiveMenu -Config $config
+            break
+        }
+        "tui" {
+            Invoke-InteractiveMenu -Config $config
             break
         }
         "env" {
