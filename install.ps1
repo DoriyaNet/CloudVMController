@@ -16,7 +16,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
-$InstallerVersion = "1.2.0"
+$InstallerVersion = "1.3.0"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 function Write-Info {
@@ -119,11 +119,17 @@ function Copy-AppFiles {
 function Ensure-EnvFile {
     param([string]$TargetRoot)
     $envPath = Join-Path $TargetRoot ".env"
-    $examplePath = Join-Path $TargetRoot ".env.example"
-    if (-not (Test-Path -LiteralPath $envPath) -and (Test-Path -LiteralPath $examplePath)) {
-        Copy-Item -LiteralPath $examplePath -Destination $envPath -Force
-        Write-Info "已创建 .env，可从 .env.example 中查看 GitHub App 配置项。"
+    if ((Test-Path -LiteralPath $envPath) -and ((Get-Item -LiteralPath $envPath).Length -gt 0)) {
+        return
     }
+    $examplePath = Join-Path $TargetRoot ".env.example"
+    if (Test-Path -LiteralPath $examplePath) {
+        Copy-Item -LiteralPath $examplePath -Destination $envPath -Force
+    } else {
+        $utf8 = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($envPath, "HOST=127.0.0.1`nPORT=4173`n", $utf8)
+    }
+    Write-Info "已创建环境文件：$envPath"
 }
 
 function Install-AppArchive {
@@ -409,6 +415,10 @@ if ($localRepo) {
 if (-not (Test-Path -LiteralPath (Join-Path $targetDir "package.json"))) {
     throw "安装目录缺少 package.json：$targetDir"
 }
+Ensure-EnvFile -TargetRoot $targetDir
+if (-not (Test-Path -LiteralPath (Join-Path $targetDir ".env"))) {
+    throw "无法创建环境文件：$(Join-Path $targetDir '.env')"
+}
 
 $nodeRuntime = Resolve-NodeRuntime -RuntimeDir $runtimeDir
 Write-Host "Node.js：$($nodeRuntime.NodePath)"
@@ -438,7 +448,6 @@ if (Test-Path -LiteralPath (Join-Path $targetDir ".git")) {
     $installMode = "zip"
 }
 
-Ensure-EnvFile -TargetRoot $targetDir
 Write-Config -AppDir $targetDir -LauncherDir $launcherDir -NodePath $nodeRuntime.NodePath -NpmPath $nodeRuntime.NpmPath -InstallMode $installMode
 
 if ($SetEnv.Count -gt 0) {
@@ -469,7 +478,6 @@ Write-Host "  cloudvm status     查看状态"
 Write-Host "  cloudvm env list   查看 .env 配置"
 Write-Host "  cloudvm env set K=V 修改 .env 配置"
 Write-Host "  cloudvm update     更新软件"
-Write-Host "  cloudvm update-script  更新 cloudvm 脚本"
 
 if ($NoPath) {
     Write-Warn "已跳过 PATH 修改。可直接运行：$cmdPath"

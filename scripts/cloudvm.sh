@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.3.0"
 
 CLOUDVM_HOME="${CLOUDVM_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/cloudvmcontroller}"
 CONFIG_FILE="${CLOUDVM_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/cloudvmcontroller/config.env}"
@@ -19,6 +19,8 @@ FOLLOW=0
 TAIL=40
 PROXY="${CLOUDVM_PROXY:-}"
 ENV_ARGS=()
+TUI_INDEX=0
+TUI_CANCELLED=0
 
 CLOUDVM_APP_DIR=""
 CLOUDVM_LAUNCHER_DIR="$CLOUDVM_HOME/bin"
@@ -175,6 +177,9 @@ fi
 
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cloudvm-cli.XXXXXX")"
 cleanup() {
+    if [[ -t 1 ]]; then
+        printf '\033[?25h' 2>/dev/null || true
+    fi
     if [[ -n "${TEMP_ROOT:-}" && -d "$TEMP_ROOT" ]]; then
         rm -rf "$TEMP_ROOT"
     fi
@@ -286,6 +291,18 @@ resolve_env_input() {
         fi
     fi
     printf '%s' "$value"
+}
+
+ensure_app_env_file() {
+    [[ -s "$APP_ENV_FILE" ]] && return 0
+    mkdir -p "$CLOUDVM_APP_DIR"
+    if [[ -f "$CLOUDVM_APP_DIR/.env.example" ]]; then
+        cp -f "$CLOUDVM_APP_DIR/.env.example" "$APP_ENV_FILE"
+    else
+        printf 'HOST=127.0.0.1\nPORT=4173\n' > "$APP_ENV_FILE"
+    fi
+    chmod 0600 "$APP_ENV_FILE" 2>/dev/null || true
+    info "已创建环境文件：$APP_ENV_FILE"
 }
 
 set_env_value() {
@@ -500,6 +517,7 @@ env_command() {
     local action="${1:-list}"
     local key
     [[ $# -gt 0 ]] && shift
+    ensure_app_env_file
     case "$action" in
         list|ls)
             list_env
@@ -746,6 +764,7 @@ open_app() {
 
 start_app() {
     local url
+    ensure_app_env_file
     url="$(app_url)"
     if health_check; then
         success "CloudVMController 已在运行：$url"
@@ -1044,8 +1063,105 @@ menu_header() {
 }
 
 menu_pause() {
+    local message="${1:-按回车返回主菜单...}"
     printf '\n'
-    read -rp "按回车返回主菜单..." _ || true
+    read -rp "$message" _ || true
+}
+
+tui_show_cursor() {
+    if [[ -t 1 ]]; then
+        printf '\033[?25h'
+    fi
+}
+
+tui_hide_cursor() {
+    if [[ -t 1 ]]; then
+        printf '\033[?25l'
+    fi
+}
+
+tui_menu() {
+    local header="$1"
+    local footer="$2"
+    shift 2
+    local -a items=("$@")
+    local selected=0
+    local key
+    local rest
+    local index
+    TUI_INDEX=0
+    TUI_CANCELLED=0
+    if [[ ${#items[@]} -eq 0 ]]; then
+        return 1
+    fi
+    tui_hide_cursor
+    while true; do
+        menu_clear
+        printf '%s\n\n' "$header"
+        for index in "${!items[@]}"; do
+            if [[ "$index" -eq "$selected" ]]; then
+                printf '\033[7m > %d) %s \033[0m\n' "$((index + 1))" "${items[$index]}"
+            else
+                printf '   %d) %s\n' "$((index + 1))" "${items[$index]}"
+            fi
+        done
+        printf '\n\033[90m%s\033[0m\n' "$footer"
+        if ! IFS= read -rsn1 key; then
+            TUI_CANCELLED=1
+            tui_show_cursor
+            return 1
+        fi
+        case "$key" in
+            $'\x1b')
+                if IFS= read -rsn2 -t 0.1 rest; then
+                    case "$rest" in
+                        '[A'|'OA')
+                            if (( selected > 0 )); then
+                                selected=$((selected - 1))
+                            fi
+                            ;;
+                        '[B'|'OB')
+                            if (( selected + 1 < ${#items[@]} )); then
+                                selected=$((selected + 1))
+                            fi
+                            ;;
+                    esac
+                else
+                    TUI_CANCELLED=1
+                    tui_show_cursor
+                    return 1
+                fi
+                ;;
+            k|K)
+                if (( selected > 0 )); then
+                    selected=$((selected - 1))
+                fi
+                ;;
+            j|J)
+                if (( selected + 1 < ${#items[@]} )); then
+                    selected=$((selected + 1))
+                fi
+                ;;
+            ''|$'\n'|$'\r')
+                TUI_INDEX=$selected
+                tui_show_cursor
+                return 0
+                ;;
+            q|Q)
+                TUI_CANCELLED=1
+                tui_show_cursor
+                return 1
+                ;;
+            [1-9])
+                index=$((key - 1))
+                if (( index >= 0 && index < ${#items[@]} )); then
+                    TUI_INDEX=$index
+                    tui_show_cursor
+                    return 0
+                fi
+                ;;
+        esac
+    done
 }
 
 run_menu_action() {
@@ -1069,11 +1185,6 @@ menu_open_app() {
     open_app
 }
 
-env_unset_key() {
-    validate_env_key "$1"
-    unset_env_value "$1"
-}
-
 run_env_action() {
     menu_clear
     ( "$@" ) || true
@@ -1081,131 +1192,408 @@ run_env_action() {
     read -rp "按回车返回环境变量菜单..." _ || true
 }
 
-env_menu() {
-    local choice
-    local key
+format_menu_value() {
+    local value="$1"
+    local max="${2:-40}"
+    value="${value//$'\n'/ }"
+    if (( ${#value} > max )); then
+        printf '%s...' "${value:0:max-3}"
+    else
+        printf '%s' "$value"
+    fi
+}
+
+env_label() {
+    case "$1" in
+        HOST) printf '监听地址 HOST' ;;
+        PORT) printf '端口 PORT' ;;
+        CLOUDVM_AUTH_MODE) printf '认证模式' ;;
+        GITHUB_APP_ID) printf 'GitHub App ID' ;;
+        GITHUB_APP_CLIENT_ID) printf 'GitHub Client ID' ;;
+        GITHUB_APP_CLIENT_SECRET) printf 'GitHub Client Secret' ;;
+        GITHUB_APP_PRIVATE_KEY) printf 'GitHub App 私钥' ;;
+        GITHUB_APP_SLUG) printf 'GitHub App Slug' ;;
+        SESSION_SECRET) printf '会话密钥 SESSION_SECRET' ;;
+        APP_ORIGIN) printf '外部访问地址 APP_ORIGIN' ;;
+        CLOUDVM_ALLOWED_GITHUB_USERS) printf 'GitHub 用户白名单' ;;
+        CLOUDVM_ALLOWED_GITHUB_IDS) printf 'GitHub 用户 ID 白名单' ;;
+        CLOUDVM_ALLOW_ANY_GITHUB_USER) printf '允许任意 GitHub 用户（谨慎）' ;;
+        CLOUDVM_TRUST_PROXY) printf '信任反向代理' ;;
+        CLOUDVM_SECURE_COOKIES) printf '强制 Secure Cookie' ;;
+        CLOUDVM_ALLOW_INSECURE_REMOTE) printf '允许本地模式远程监听（谨慎）' ;;
+        LINODE_API_TOKEN) printf 'Linode API Token' ;;
+        CLOUDVM_DATA_DIR) printf '数据目录 CLOUDVM_DATA_DIR' ;;
+        LINODE_API_BASE) printf 'Linode API 地址' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+env_display_value() {
+    local key="$1"
     local value
-    while true; do
-        menu_clear
-        printf '\033[1;36m环境变量管理\033[0m\n\n'
-        printf '配置文件：%s\n\n' "$APP_ENV_FILE"
-        printf '  1) 查看全部（密钥已隐藏）\n'
-        printf '  2) 查看单项\n'
-        printf '  3) 修改 / 新增\n'
-        printf '  4) 删除\n'
-        printf '  0) 返回主菜单\n\n'
-        printf '修改后请返回主菜单选择「重启服务」使配置生效。\n\n'
-        if ! read -rp "请选择操作: " choice; then
+    value="$(env_value "$key" "$APP_ENV_FILE")"
+    if is_sensitive_env_key "$key"; then
+        if [[ -n "$value" ]]; then
+            printf '(已设置)'
+        else
+            printf '(未设置)'
+        fi
+        return 0
+    fi
+    case "$key" in
+        CLOUDVM_AUTH_MODE)
+            if [[ -z "$value" ]]; then printf '自动'; else printf '%s' "$value"; fi
+            ;;
+        CLOUDVM_ALLOW_ANY_GITHUB_USER|CLOUDVM_TRUST_PROXY|CLOUDVM_SECURE_COOKIES|CLOUDVM_ALLOW_INSECURE_REMOTE)
+            if [[ "$value" = "1" ]]; then printf '启用'; else printf '禁用'; fi
+            ;;
+        *)
+            if [[ -n "$value" ]]; then
+                format_menu_value "$value" 40
+            else
+                printf '(未设置)'
+            fi
+            ;;
+    esac
+}
+
+generate_session_secret() {
+    local value=""
+    if command -v openssl >/dev/null 2>&1; then
+        value="$(openssl rand -base64 48 2>/dev/null | tr -d '\r\n' || true)"
+        if [[ -n "$value" ]]; then
+            printf '%s' "$value"
             return 0
         fi
-        case "$choice" in
+    fi
+    if command -v base64 >/dev/null 2>&1; then
+        value="$(head -c 48 /dev/urandom 2>/dev/null | base64 | tr -d '\r\n' || true)"
+        if [[ -n "$value" ]]; then
+            printf '%s' "$value"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+apply_env_edit_value() {
+    local key="$1"
+    local value="$2"
+    printf '\n'
+    if [[ -z "$value" ]]; then
+        ( unset_env_value "$key" ) || true
+    else
+        ( set_env "$key=$value" ) || true
+    fi
+    menu_pause "按回车返回环境变量列表..."
+}
+
+env_edit_text() {
+    local key="$1"
+    local value
+    printf '\n%s\n当前值：%s\n' "$(env_label "$key")" "$(env_display_value "$key")"
+    if is_sensitive_env_key "$key"; then
+        if ! IFS= read -rsp "新值（留空清除，@文件读取内容）: " value; then
+            printf '\n'
+            return 0
+        fi
+    else
+        if ! IFS= read -rp "新值（留空清除，@文件读取内容）: " value; then
+            return 0
+        fi
+    fi
+    printf '\n'
+    apply_env_edit_value "$key" "$value"
+}
+
+env_edit_boolean() {
+    local key="$1"
+    local header
+    header="$(printf '%s\n\n当前值：%s' "$(env_label "$key")" "$(env_display_value "$key")")"
+    case "$key" in
+        CLOUDVM_ALLOW_ANY_GITHUB_USER)
+            header+=$'\n\n警告：启用后任何 GitHub 用户都可访问，请确保已配置 HTTPS 和反向代理。'
+            ;;
+        CLOUDVM_ALLOW_INSECURE_REMOTE)
+            header+=$'\n\n警告：仅应在反向代理已强制 HTTPS 和身份认证时启用。'
+            ;;
+    esac
+    if ! tui_menu "$header" "↑/↓ 选择  Enter 确认  q 取消" "启用 (1)" "禁用 / 清除" "取消"; then
+        return 0
+    fi
+    case "$TUI_INDEX" in
+        0) apply_env_edit_value "$key" "1" ;;
+        1) apply_env_edit_value "$key" "" ;;
+    esac
+}
+
+env_edit_host() {
+    local header
+    local value
+    header="$(printf '监听地址 HOST\n\n当前值：%s\n\n0.0.0.0 会监听所有网卡；本地模式还需要鉴权或显式允许不安全远程访问。' "$(env_display_value HOST)")"
+    if ! tui_menu "$header" "↑/↓ 选择  Enter 确认  q 取消" \
+        "127.0.0.1（仅本机，推荐）" \
+        "0.0.0.0（监听所有网卡）" \
+        "自定义..." \
+        "清除（默认 127.0.0.1）" \
+        "取消"; then
+        return 0
+    fi
+    case "$TUI_INDEX" in
+        0) apply_env_edit_value HOST "127.0.0.1" ;;
+        1) apply_env_edit_value HOST "0.0.0.0" ;;
+        2)
+            if ! IFS= read -rp "监听地址: " value; then
+                return 0
+            fi
+            if [[ -n "$value" ]]; then
+                apply_env_edit_value HOST "$value"
+            fi
+            ;;
+        3) apply_env_edit_value HOST "" ;;
+    esac
+}
+
+env_edit_port() {
+    local value
+    printf '\n端口 PORT\n当前值：%s\n' "$(env_display_value PORT)"
+    if ! IFS= read -rp "新端口（1-65535，留空清除）: " value; then
+        return 0
+    fi
+    if [[ -n "$value" ]]; then
+        if ! [[ "$value" =~ ^[0-9]{1,5}$ ]] || (( 10#$value < 1 || 10#$value > 65535 )); then
+            warn "端口必须是 1-65535 之间的数字。"
+            menu_pause "按回车返回环境变量列表..."
+            return 0
+        fi
+    fi
+    apply_env_edit_value PORT "$value"
+}
+
+env_edit_auth_mode() {
+    local header
+    header="$(printf '认证模式\n\n当前值：%s\n\n自动：填写完整 GitHub App 配置时使用 github，否则使用 local。' "$(env_display_value CLOUDVM_AUTH_MODE)")"
+    if ! tui_menu "$header" "↑/↓ 选择  Enter 确认  q 取消" \
+        "自动（留空）" \
+        "github（GitHub App + 私有仓库保险库）" \
+        "local（本机加密设置）" \
+        "取消"; then
+        return 0
+    fi
+    case "$TUI_INDEX" in
+        0) apply_env_edit_value CLOUDVM_AUTH_MODE "" ;;
+        1) apply_env_edit_value CLOUDVM_AUTH_MODE "github" ;;
+        2) apply_env_edit_value CLOUDVM_AUTH_MODE "local" ;;
+    esac
+}
+
+env_edit_session_secret() {
+    local header
+    local value
+    header="$(printf '会话密钥 SESSION_SECRET\n\n当前值：%s\n\n至少 32 字节，用于加密 OAuth / 会话 Cookie。' "$(env_display_value SESSION_SECRET)")"
+    if ! tui_menu "$header" "↑/↓ 选择  Enter 确认  q 取消" \
+        "自动生成（推荐）" \
+        "手动输入" \
+        "清除" \
+        "取消"; then
+        return 0
+    fi
+    case "$TUI_INDEX" in
+        0)
+            if ! value="$(generate_session_secret)"; then
+                warn "无法生成随机密钥，请安装 openssl 或 base64。"
+                menu_pause "按回车返回环境变量列表..."
+                return 0
+            fi
+            apply_env_edit_value SESSION_SECRET "$value"
+            ;;
+        1) env_edit_text SESSION_SECRET ;;
+        2) apply_env_edit_value SESSION_SECRET "" ;;
+    esac
+}
+
+env_edit_private_key() {
+    local header
+    local path
+    local value
+    header="$(printf 'GitHub App 私钥\n\n当前值：%s\n\n推荐从 PEM 文件读取，脚本会保存为单行 \\n 转义格式。' "$(env_display_value GITHUB_APP_PRIVATE_KEY)")"
+    if ! tui_menu "$header" "↑/↓ 选择  Enter 确认  q 取消" \
+        "从文件读取" \
+        "手动输入单行内容" \
+        "清除" \
+        "取消"; then
+        return 0
+    fi
+    case "$TUI_INDEX" in
+        0)
+            if ! IFS= read -rp "私钥文件路径: " path; then
+                return 0
+            fi
+            if [[ -z "$path" || ! -f "$path" ]]; then
+                warn "文件不存在：$path"
+                menu_pause "按回车返回环境变量列表..."
+                return 0
+            fi
+            if [[ "$path" != @* ]]; then
+                path="@$path"
+            fi
+            apply_env_edit_value GITHUB_APP_PRIVATE_KEY "$path"
+            ;;
+        1) env_edit_text GITHUB_APP_PRIVATE_KEY ;;
+        2) apply_env_edit_value GITHUB_APP_PRIVATE_KEY "" ;;
+    esac
+}
+
+edit_env_key() {
+    local key="$1"
+    case "$key" in
+        HOST) env_edit_host ;;
+        PORT) env_edit_port ;;
+        CLOUDVM_AUTH_MODE) env_edit_auth_mode ;;
+        SESSION_SECRET) env_edit_session_secret ;;
+        GITHUB_APP_PRIVATE_KEY) env_edit_private_key ;;
+        CLOUDVM_ALLOW_ANY_GITHUB_USER|CLOUDVM_TRUST_PROXY|CLOUDVM_SECURE_COOKIES|CLOUDVM_ALLOW_INSECURE_REMOTE)
+            env_edit_boolean "$key"
+            ;;
+        *) env_edit_text "$key" ;;
+    esac
+}
+
+env_group_menu() {
+    local title="$1"
+    shift
+    local -a keys=("$@")
+    local -a items
+    local key
+    local header
+    local index
+    while true; do
+        items=()
+        for key in "${keys[@]}"; do
+            items+=("$(env_label "$key") = $(env_display_value "$key")")
+        done
+        items+=("返回")
+        header="$(printf '环境变量管理 / %s\n\n配置文件：%s' "$title" "$APP_ENV_FILE")"
+        if ! tui_menu "$header" "↑/↓ 选择  Enter 确认  q 返回" "${items[@]}"; then
+            return 0
+        fi
+        index=$TUI_INDEX
+        if (( index == ${#keys[@]} )); then
+            return 0
+        fi
+        key="${keys[$index]}"
+        edit_env_key "$key"
+    done
+}
+
+env_menu() {
+    local header
+    local -a items
+    ensure_app_env_file
+    while true; do
+        items=(
+            "基础连接（HOST / PORT）"
+            "GitHub 鉴权与保险库"
+            "访问控制与反向代理"
+            "数据与 API"
+            "查看全部（密钥隐藏）"
+            "返回主菜单"
+        )
+        header="$(printf '环境变量管理\n\n配置文件：%s' "$APP_ENV_FILE")"
+        if ! tui_menu "$header" "↑/↓ 选择  Enter 确认  q 返回" "${items[@]}"; then
+            return 0
+        fi
+        case "$TUI_INDEX" in
+            0)
+                env_group_menu "基础连接" HOST PORT
+                ;;
             1)
-                run_env_action list_env
+                env_group_menu "GitHub 鉴权与保险库" \
+                    CLOUDVM_AUTH_MODE \
+                    GITHUB_APP_ID \
+                    GITHUB_APP_CLIENT_ID \
+                    GITHUB_APP_CLIENT_SECRET \
+                    GITHUB_APP_PRIVATE_KEY \
+                    GITHUB_APP_SLUG \
+                    SESSION_SECRET \
+                    APP_ORIGIN
                 ;;
             2)
-                if ! read -rp "变量名: " key || [[ -z "$key" ]]; then
-                    warn "变量名不能为空。"
-                    sleep 1
-                    continue
-                fi
-                run_env_action get_env "$key"
+                env_group_menu "访问控制与反向代理" \
+                    CLOUDVM_ALLOWED_GITHUB_USERS \
+                    CLOUDVM_ALLOWED_GITHUB_IDS \
+                    CLOUDVM_ALLOW_ANY_GITHUB_USER \
+                    CLOUDVM_TRUST_PROXY \
+                    CLOUDVM_SECURE_COOKIES \
+                    CLOUDVM_ALLOW_INSECURE_REMOTE
                 ;;
             3)
-                if ! read -rp "变量名: " key || [[ -z "$key" ]]; then
-                    warn "变量名不能为空。"
-                    sleep 1
-                    continue
-                fi
-                if is_sensitive_env_key "$key"; then
-                    if ! IFS= read -rsp "值（支持 @文件路径，输入不显示）: " value; then
-                        printf '\n'
-                        continue
-                    fi
-                else
-                    if ! IFS= read -rp "值（支持 @文件路径）: " value; then
-                        continue
-                    fi
-                fi
-                printf '\n'
-                run_env_action set_env "$key=$value"
+                env_group_menu "数据与 API" \
+                    LINODE_API_TOKEN \
+                    CLOUDVM_DATA_DIR \
+                    LINODE_API_BASE
                 ;;
             4)
-                if ! read -rp "变量名: " key || [[ -z "$key" ]]; then
-                    warn "变量名不能为空。"
-                    sleep 1
-                    continue
-                fi
-                run_env_action env_unset_key "$key"
+                run_env_action list_env
                 ;;
-            0|q|Q)
+            5)
                 return 0
-                ;;
-            *)
-                printf '无效选择。\n'
-                sleep 1
                 ;;
         esac
     done
 }
 
 interactive_menu() {
-    local choice
+    local header
+    local -a items=(
+        "启动服务"
+        "停止服务"
+        "重启服务"
+        "查看状态"
+        "查看日志"
+        "环境变量管理"
+        "更新软件（含脚本）"
+        "打开 Web 界面（桌面环境）"
+        "退出"
+    )
     if [[ ! -t 0 || ! -t 1 ]]; then
         die "交互菜单需要终端。可执行 cloudvm help 查看命令。"
     fi
+    ensure_app_env_file
     while true; do
-        menu_clear
-        menu_header
-        printf '\n'
-        printf '  1) 启动服务\n'
-        printf '  2) 停止服务\n'
-        printf '  3) 重启服务\n'
-        printf '  4) 查看状态\n'
-        printf '  5) 查看日志\n'
-        printf '  6) 环境变量管理\n'
-        printf '  7) 更新软件\n'
-        printf '  8) 更新 cloudvm 脚本\n'
-        printf '  9) 打开 Web 界面（桌面环境）\n'
-        printf '  0) 退出\n\n'
-        if ! read -rp "请选择操作: " choice; then
-            printf '\n'
+        header="$(menu_header)"
+        if ! tui_menu "$header" "↑/↓ 选择  Enter 确认  q 退出" "${items[@]}"; then
+            menu_clear
             return 0
         fi
-        case "$choice" in
-            1)
+        case "$TUI_INDEX" in
+            0)
                 run_menu_action start_app
                 ;;
-            2)
+            1)
                 run_menu_action stop_app
                 ;;
-            3)
+            2)
                 run_menu_action menu_restart_app
                 ;;
-            4)
+            3)
                 run_menu_action show_status
                 ;;
-            5)
+            4)
                 run_menu_action menu_show_logs
                 ;;
-            6)
+            5)
                 env_menu
                 ;;
-            7)
+            6)
                 run_menu_action update_app
                 ;;
-            8)
-                run_menu_action update_script
-                ;;
-            9)
+            7)
                 run_menu_action menu_open_app
                 ;;
-            0|q|Q)
+            8)
                 menu_clear
                 return 0
-                ;;
-            *)
-                printf '无效选择。\n'
-                sleep 1
                 ;;
         esac
     done

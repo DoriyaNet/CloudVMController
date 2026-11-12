@@ -23,7 +23,6 @@ cloudvm              # 进入交互菜单
 cloudvm start        # 启动服务（不打开浏览器）
 cloudvm open         # 在桌面环境下手动打开 Web 界面
 cloudvm update       # 更新软件
-cloudvm update-script # 更新 cloudvm 脚本
 ```
 
 安装时可以直接写入环境变量：
@@ -53,7 +52,6 @@ curl -fsSL https://raw.githubusercontent.com/DoriyaNet/CloudVMController/main/in
 ```bash
 cloudvm
 cloudvm update
-cloudvm update-script
 ```
 
 安装时可以直接写入环境变量，适合非交互式服务器部署：
@@ -72,7 +70,7 @@ curl -fsSL https://raw.githubusercontent.com/DoriyaNet/CloudVMController/main/in
 
 ## 交互菜单
 
-在终端直接运行 `cloudvm`，或执行 `cloudvm menu` / `cloudvm tui`，会进入类似 x-ui 的编号菜单：
+在终端直接运行 `cloudvm`，或执行 `cloudvm menu` / `cloudvm tui`，会进入类似 x-ui 的全屏 TUI 菜单。使用 ↑/↓ 选择、Enter 确认、Q 返回或退出，也可以直接按数字：
 
 ```text
   1) 启动服务
@@ -81,13 +79,12 @@ curl -fsSL https://raw.githubusercontent.com/DoriyaNet/CloudVMController/main/in
   4) 查看状态
   5) 查看日志
   6) 环境变量管理
-  7) 更新软件
-  8) 更新 cloudvm 脚本
-  9) 打开 Web 界面（桌面环境）
-  0) 退出
+  7) 更新软件（含脚本）
+  8) 打开 Web 界面（桌面环境）
+  9) 退出
 ```
 
-菜单顶部会显示版本、监听地址、运行状态、安装目录和 `.env` 路径。环境变量子菜单支持查看、修改、新增和删除，输入敏感变量时会隐藏输入内容。非交互环境（例如脚本、定时任务）中直接无参数运行 `cloudvm` 仍按 `cloudvm start` 处理；建议显式写 `cloudvm start`。
+菜单顶部会显示版本、监听地址、运行状态、安装目录和 `.env` 路径。环境变量子菜单按「基础连接 / GitHub 鉴权与保险库 / 访问控制与反向代理 / 数据与 API」分组，直接选择要修改的变量，不再需要手输变量名；布尔项和认证模式使用选择器，敏感值输入时会隐藏内容。非交互环境（例如脚本、定时任务）中直接无参数运行 `cloudvm` 仍按 `cloudvm start` 处理；建议显式写 `cloudvm start`。
 
 ## 环境变量管理
 
@@ -102,6 +99,8 @@ cloudvm restart
 ```
 
 修改会写入安装目录的 `.env`，重启服务后生效。`cloudvm env list` 会隐藏 `SECRET`、`TOKEN`、`PASSWORD`、`PRIVATE_KEY` 和 `PROXY` 的值；需要查看单个值时使用 `cloudvm env get KEY`。
+
+安装脚本会在安装目录提前创建 `.env`；如果文件缺失或为空，`cloudvm` 菜单、启动服务和 `cloudvm env` 命令也会尝试从 `.env.example` 重新创建。
 
 多行内容（例如 GitHub App 私钥）可以先保存为文件，再写入：
 

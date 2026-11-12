@@ -15,7 +15,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
-$ScriptVersion = "1.2.0"
+$ScriptVersion = "1.3.0"
 
 function Write-Info {
     param([string]$Message)
@@ -161,6 +161,23 @@ function Get-EnvFileValue {
         }
     }
     return ""
+}
+
+function Ensure-AppEnvFile {
+    param([pscustomobject]$Config)
+    $envPath = Join-Path $Config.appDir ".env"
+    if ((Test-Path -LiteralPath $envPath) -and ((Get-Item -LiteralPath $envPath).Length -gt 0)) {
+        return $envPath
+    }
+    $examplePath = Join-Path $Config.appDir ".env.example"
+    if (Test-Path -LiteralPath $examplePath) {
+        Copy-Item -LiteralPath $examplePath -Destination $envPath -Force
+    } else {
+        $utf8 = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($envPath, "HOST=127.0.0.1`nPORT=4173`n", $utf8)
+    }
+    Write-Info "已创建环境文件：$envPath"
+    return $envPath
 }
 
 function Get-EnvQuoteState {
@@ -361,7 +378,7 @@ function Invoke-EnvCommand {
         [pscustomobject]$Config,
         [string[]]$Arguments
     )
-    $envPath = Join-Path $Config.appDir ".env"
+    $envPath = Ensure-AppEnvFile -Config $Config
     $action = "list"
     $rest = @()
     if ($Arguments -and $Arguments.Count -gt 0) {
@@ -655,6 +672,7 @@ function Open-App {
 
 function Start-App {
     param([pscustomobject]$Config)
+    Ensure-AppEnvFile -Config $Config | Out-Null
     $url = Get-AppUrl -Config $Config
     if (Test-AppHealth -Config $Config) {
         Write-Success "CloudVMController 已在运行：$url"
@@ -958,26 +976,25 @@ function Test-SensitiveEnvName {
     return $Name -match '(?i)(SECRET|TOKEN|PASSWORD|PRIVATE_KEY|PROXY)'
 }
 
-function Show-MenuHeader {
+function Get-MenuHeaderLines {
     param([pscustomobject]$Config)
     $process = Get-RunningProcess
     if ($process) {
         $state = "运行中（PID $($process.Id)）"
-        $stateColor = "Green"
     } elseif (Test-AppHealth -Config $Config) {
         $state = "运行中（非 cloudvm 启动）"
-        $stateColor = "Green"
     } else {
         $state = "已停止"
-        $stateColor = "Red"
     }
-    Write-Host " CloudVMController 控制台" -ForegroundColor Cyan
-    Write-Host " 版本    $((Get-AppVersion -Config $Config))"
-    Write-Host " CLI     $ScriptVersion"
-    Write-Host " 地址    $(Get-AppUrl -Config $Config)"
-    Write-Host " 状态    $state" -ForegroundColor $stateColor
-    Write-Host " 安装    $($Config.appDir)"
-    Write-Host " 配置    $(Join-Path $Config.appDir '.env')"
+    return @(
+        " CloudVMController 控制台",
+        " 版本    $((Get-AppVersion -Config $Config))",
+        " CLI     $ScriptVersion",
+        " 地址    $(Get-AppUrl -Config $Config)",
+        " 状态    $state",
+        " 安装    $($Config.appDir)",
+        " 配置    $(Join-Path $Config.appDir '.env')"
+    )
 }
 
 function Invoke-MenuStart {
@@ -1019,41 +1036,6 @@ function Invoke-MenuUpdate {
     Update-App -Config $Config
 }
 
-function Invoke-MenuUpdateScript {
-    param([pscustomobject]$Config)
-    Update-Script -Config $Config
-}
-
-function Invoke-MenuEnvList {
-    param([string]$Path)
-    Show-EnvList -Path $Path
-}
-
-function Invoke-MenuEnvGet {
-    param(
-        [string]$Path,
-        [string]$Name
-    )
-    Get-EnvEntry -Path $Path -Name $Name
-}
-
-function Invoke-MenuEnvSet {
-    param(
-        [pscustomobject]$Config,
-        [string]$Name,
-        [string]$Value
-    )
-    Invoke-EnvCommand -Config $Config -Arguments @("set", "$Name=$Value")
-}
-
-function Invoke-MenuEnvUnset {
-    param(
-        [pscustomobject]$Config,
-        [string]$Name
-    )
-    Invoke-EnvCommand -Config $Config -Arguments @("unset", $Name)
-}
-
 function Invoke-MenuAction {
     param(
         [string]$Command,
@@ -1074,7 +1056,7 @@ function Invoke-MenuAction {
 function Read-EnvMenuValue {
     param([string]$Name)
     if (Test-SensitiveEnvName -Name $Name) {
-        $secure = Read-Host -AsSecureString "值（支持 @文件路径，输入不显示）"
+        $secure = Read-Host -AsSecureString "新值（留空清除，支持 @文件路径，输入不显示）"
         $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
         try {
             return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
@@ -1082,75 +1064,409 @@ function Read-EnvMenuValue {
             [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
         }
     }
-    return Read-Host "值（支持 @文件路径）"
+    return Read-Host "新值（留空清除，支持 @文件路径）"
+}
+
+function Read-TuiMenu {
+    param(
+        [string[]]$HeaderLines,
+        [string[]]$Items,
+        [string]$Footer = "↑/↓ 选择  Enter 确认  Q 返回"
+    )
+    if (-not $Items -or $Items.Count -eq 0) {
+        return -1
+    }
+    $selected = 0
+    while ($true) {
+        Clear-MenuScreen
+        if ($HeaderLines) {
+            foreach ($line in $HeaderLines) {
+                Write-Host $line
+            }
+        }
+        Write-Host ""
+        for ($index = 0; $index -lt $Items.Count; $index += 1) {
+            if ($index -eq $selected) {
+                Write-Host (" > " + $Items[$index]) -ForegroundColor Black -BackgroundColor Cyan
+            } else {
+                Write-Host ("   " + $Items[$index])
+            }
+        }
+        Write-Host ""
+        Write-Host $Footer -ForegroundColor DarkGray
+        $keyInfo = [Console]::ReadKey($true)
+        switch ([string]$keyInfo.Key) {
+            "UpArrow" {
+                if ($selected -gt 0) {
+                    $selected -= 1
+                }
+            }
+            "DownArrow" {
+                if ($selected -lt $Items.Count - 1) {
+                    $selected += 1
+                }
+            }
+            "Enter" {
+                return $selected
+            }
+            "Escape" {
+                return -1
+            }
+            "Q" {
+                return -1
+            }
+            default {
+                $charText = [string]$keyInfo.KeyChar
+                if ($charText -match '^[1-9]$') {
+                    $numericIndex = [int]$charText - 1
+                    if ($numericIndex -ge 0 -and $numericIndex -lt $Items.Count) {
+                        return $numericIndex
+                    }
+                }
+            }
+        }
+    }
+}
+
+function Format-MenuValue {
+    param(
+        [string]$Value,
+        [int]$MaxLength = 40
+    )
+    $flat = $Value -replace "`r?`n", " "
+    if ($flat.Length -gt $MaxLength) {
+        return $flat.Substring(0, $MaxLength - 3) + "..."
+    }
+    return $flat
+}
+
+function Get-EnvLabel {
+    param([string]$Key)
+    switch ($Key) {
+        "HOST" { return "监听地址 HOST" }
+        "PORT" { return "端口 PORT" }
+        "CLOUDVM_AUTH_MODE" { return "认证模式" }
+        "GITHUB_APP_ID" { return "GitHub App ID" }
+        "GITHUB_APP_CLIENT_ID" { return "GitHub Client ID" }
+        "GITHUB_APP_CLIENT_SECRET" { return "GitHub Client Secret" }
+        "GITHUB_APP_PRIVATE_KEY" { return "GitHub App 私钥" }
+        "GITHUB_APP_SLUG" { return "GitHub App Slug" }
+        "SESSION_SECRET" { return "会话密钥 SESSION_SECRET" }
+        "APP_ORIGIN" { return "外部访问地址 APP_ORIGIN" }
+        "CLOUDVM_ALLOWED_GITHUB_USERS" { return "GitHub 用户白名单" }
+        "CLOUDVM_ALLOWED_GITHUB_IDS" { return "GitHub 用户 ID 白名单" }
+        "CLOUDVM_ALLOW_ANY_GITHUB_USER" { return "允许任意 GitHub 用户（谨慎）" }
+        "CLOUDVM_TRUST_PROXY" { return "信任反向代理" }
+        "CLOUDVM_SECURE_COOKIES" { return "强制 Secure Cookie" }
+        "CLOUDVM_ALLOW_INSECURE_REMOTE" { return "允许本地模式远程监听（谨慎）" }
+        "LINODE_API_TOKEN" { return "Linode API Token" }
+        "CLOUDVM_DATA_DIR" { return "数据目录 CLOUDVM_DATA_DIR" }
+        "LINODE_API_BASE" { return "Linode API 地址" }
+        default { return $Key }
+    }
+}
+
+function Get-EnvDisplayValue {
+    param(
+        [string]$Path,
+        [string]$Key
+    )
+    $value = Get-EnvFileValue -Path $Path -Name $Key
+    if (Test-SensitiveEnvName -Name $Key) {
+        if ($value) { return "(已设置)" }
+        return "(未设置)"
+    }
+    if ($Key -eq "CLOUDVM_AUTH_MODE") {
+        if (-not $value) { return "自动" }
+        return $value
+    }
+    if ($Key -in @(
+        "CLOUDVM_ALLOW_ANY_GITHUB_USER",
+        "CLOUDVM_TRUST_PROXY",
+        "CLOUDVM_SECURE_COOKIES",
+        "CLOUDVM_ALLOW_INSECURE_REMOTE"
+    )) {
+        if ($value -eq "1") { return "启用" }
+        return "禁用"
+    }
+    if ($value) {
+        return Format-MenuValue -Value $value -MaxLength 40
+    }
+    return "(未设置)"
+}
+
+function Generate-SessionSecret {
+    $random = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $bytes = New-Object byte[] 48
+        $random.GetBytes($bytes)
+        return [Convert]::ToBase64String($bytes)
+    } finally {
+        $random.Dispose()
+    }
+}
+
+function Set-MenuEnvValue {
+    param(
+        [pscustomobject]$Config,
+        [string]$Key,
+        [string]$Value
+    )
+    Clear-MenuScreen
+    try {
+        if ([string]::IsNullOrEmpty($Value)) {
+            Invoke-EnvCommand -Config $Config -Arguments @("unset", $Key)
+        } else {
+            Invoke-EnvCommand -Config $Config -Arguments @("set", "$Key=$Value")
+        }
+    } catch {
+        Write-Host ""
+        Write-Host $_.Exception.Message -ForegroundColor Red
+    }
+    Write-Host ""
+    Read-Host "按回车返回环境变量列表" | Out-Null
+}
+
+function Edit-EnvKey {
+    param(
+        [pscustomobject]$Config,
+        [string]$Key
+    )
+    $envPath = Ensure-AppEnvFile -Config $Config
+    $current = Get-EnvDisplayValue -Path $envPath -Key $Key
+    if ($Key -in @(
+        "CLOUDVM_ALLOW_ANY_GITHUB_USER",
+        "CLOUDVM_TRUST_PROXY",
+        "CLOUDVM_SECURE_COOKIES",
+        "CLOUDVM_ALLOW_INSECURE_REMOTE"
+    )) {
+        $header = @(
+            " 环境变量管理 / $(Get-EnvLabel -Key $Key)",
+            "",
+            "当前值：$current"
+        )
+        if ($Key -eq "CLOUDVM_ALLOW_ANY_GITHUB_USER") {
+            $header += @("", "警告：启用后任何 GitHub 用户都可访问，请确保已配置 HTTPS 和反向代理。")
+        } elseif ($Key -eq "CLOUDVM_ALLOW_INSECURE_REMOTE") {
+            $header += @("", "警告：仅应在反向代理已强制 HTTPS 和身份认证时启用。")
+        }
+        $choice = Read-TuiMenu -HeaderLines $header -Items @("启用 (1)", "禁用 / 清除", "取消")
+        switch ($choice) {
+            0 { Set-MenuEnvValue -Config $Config -Key $Key -Value "1"; return }
+            1 { Set-MenuEnvValue -Config $Config -Key $Key -Value ""; return }
+            default { return }
+        }
+    }
+    switch ($Key) {
+        "HOST" {
+            $choice = Read-TuiMenu -HeaderLines @(
+                " 环境变量管理 / 监听地址 HOST",
+                "",
+                "当前值：$current",
+                "",
+                "0.0.0.0 会监听所有网卡；本地模式还需要鉴权或显式允许不安全远程访问。"
+            ) -Items @(
+                "127.0.0.1（仅本机，推荐）",
+                "0.0.0.0（监听所有网卡）",
+                "自定义...",
+                "清除（默认 127.0.0.1）",
+                "取消"
+            )
+            switch ($choice) {
+                0 { Set-MenuEnvValue -Config $Config -Key $Key -Value "127.0.0.1"; return }
+                1 { Set-MenuEnvValue -Config $Config -Key $Key -Value "0.0.0.0"; return }
+                2 {
+                    $value = Read-Host "监听地址"
+                    if ($value) {
+                        Set-MenuEnvValue -Config $Config -Key $Key -Value $value
+                    }
+                    return
+                }
+                3 { Set-MenuEnvValue -Config $Config -Key $Key -Value ""; return }
+                default { return }
+            }
+        }
+        "PORT" {
+            Write-Host ""
+            Write-Host "端口 PORT"
+            Write-Host "当前值：$current"
+            $value = Read-Host "新端口（1-65535，留空清除）"
+            if ($value) {
+                $port = 0
+                if (-not [int]::TryParse($value, [ref]$port) -or $port -lt 1 -or $port -gt 65535) {
+                    Write-Warn "端口必须是 1-65535 之间的数字。"
+                    Read-Host "按回车返回环境变量列表" | Out-Null
+                    return
+                }
+            }
+            Set-MenuEnvValue -Config $Config -Key $Key -Value $value
+            return
+        }
+        "CLOUDVM_AUTH_MODE" {
+            $choice = Read-TuiMenu -HeaderLines @(
+                " 环境变量管理 / 认证模式",
+                "",
+                "当前值：$current",
+                "",
+                "自动：填写完整 GitHub App 配置时使用 github，否则使用 local。"
+            ) -Items @(
+                "自动（留空）",
+                "github（GitHub App + 私有仓库保险库）",
+                "local（本机加密设置）",
+                "取消"
+            )
+            switch ($choice) {
+                0 { Set-MenuEnvValue -Config $Config -Key $Key -Value ""; return }
+                1 { Set-MenuEnvValue -Config $Config -Key $Key -Value "github"; return }
+                2 { Set-MenuEnvValue -Config $Config -Key $Key -Value "local"; return }
+                default { return }
+            }
+        }
+        "SESSION_SECRET" {
+            $choice = Read-TuiMenu -HeaderLines @(
+                " 环境变量管理 / 会话密钥 SESSION_SECRET",
+                "",
+                "当前值：$current",
+                "",
+                "至少 32 字节，用于加密 OAuth / 会话 Cookie。"
+            ) -Items @("自动生成（推荐）", "手动输入", "清除", "取消")
+            switch ($choice) {
+                0 {
+                    Set-MenuEnvValue -Config $Config -Key $Key -Value (Generate-SessionSecret)
+                    return
+                }
+                1 {
+                    $value = Read-EnvMenuValue -Name $Key
+                    Set-MenuEnvValue -Config $Config -Key $Key -Value $value
+                    return
+                }
+                2 { Set-MenuEnvValue -Config $Config -Key $Key -Value ""; return }
+                default { return }
+            }
+        }
+        "GITHUB_APP_PRIVATE_KEY" {
+            $choice = Read-TuiMenu -HeaderLines @(
+                " 环境变量管理 / GitHub App 私钥",
+                "",
+                "当前值：$current",
+                "",
+                "推荐从 PEM 文件读取，脚本会保存为单行 \n 转义格式。"
+            ) -Items @("从文件读取", "手动输入单行内容", "清除", "取消")
+            switch ($choice) {
+                0 {
+                    $path = Read-Host "私钥文件路径"
+                    if ($path -and $path.StartsWith("@")) {
+                        $path = $path.Substring(1)
+                    }
+                    if (-not $path -or -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                        Write-Warn "文件不存在：$path"
+                        Read-Host "按回车返回环境变量列表" | Out-Null
+                        return
+                    }
+                    $storedPath = "@" + $path
+                    Set-MenuEnvValue -Config $Config -Key $Key -Value $storedPath
+                    return
+                }
+                1 {
+                    $value = Read-EnvMenuValue -Name $Key
+                    Set-MenuEnvValue -Config $Config -Key $Key -Value $value
+                    return
+                }
+                2 { Set-MenuEnvValue -Config $Config -Key $Key -Value ""; return }
+                default { return }
+            }
+        }
+        default {
+            Write-Host ""
+            Write-Host (Get-EnvLabel -Key $Key)
+            Write-Host "当前值：$current"
+            $value = Read-EnvMenuValue -Name $Key
+            Set-MenuEnvValue -Config $Config -Key $Key -Value $value
+            return
+        }
+    }
+}
+
+function Show-EnvGroupMenu {
+    param(
+        [pscustomobject]$Config,
+        [string]$Title,
+        [string[]]$Keys
+    )
+    $envPath = Ensure-AppEnvFile -Config $Config
+    while ($true) {
+        $items = @()
+        foreach ($key in $Keys) {
+            $items += "$(Get-EnvLabel -Key $key) = $(Get-EnvDisplayValue -Path $envPath -Key $key)"
+        }
+        $items += "返回"
+        $choice = Read-TuiMenu -HeaderLines @(
+            " 环境变量管理 / $Title",
+            "",
+            "配置文件：$envPath"
+        ) -Items $items
+        if ($choice -lt 0 -or $choice -eq $Keys.Count) {
+            return
+        }
+        Edit-EnvKey -Config $Config -Key $Keys[$choice]
+    }
 }
 
 function Show-EnvMenu {
     param([pscustomobject]$Config)
-    $envPath = Join-Path $Config.appDir ".env"
+    $envPath = Ensure-AppEnvFile -Config $Config
     while ($true) {
-        Clear-MenuScreen
-        Write-Host "环境变量管理" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "配置文件：$envPath"
-        Write-Host ""
-        Write-Host "  1) 查看全部（密钥已隐藏）"
-        Write-Host "  2) 查看单项"
-        Write-Host "  3) 修改 / 新增"
-        Write-Host "  4) 删除"
-        Write-Host "  0) 返回主菜单"
-        Write-Host ""
-        Write-Host "修改后请返回主菜单选择「重启服务」使配置生效。" -ForegroundColor DarkGray
-        Write-Host ""
-        $choice = Read-Host "请选择操作"
+        $choice = Read-TuiMenu -HeaderLines @(
+            " 环境变量管理",
+            "",
+            "配置文件：$envPath"
+        ) -Items @(
+            "基础连接（HOST / PORT）",
+            "GitHub 鉴权与保险库",
+            "访问控制与反向代理",
+            "数据与 API",
+            "查看全部（密钥隐藏）",
+            "返回主菜单"
+        )
+        if ($choice -lt 0 -or $choice -eq 5) {
+            return
+        }
         switch ($choice) {
-            "1" {
-                Invoke-MenuAction -Command "Invoke-MenuEnvList" -Arguments @($envPath) -PauseMessage "按回车返回环境变量菜单"
-                break
+            0 { Show-EnvGroupMenu -Config $Config -Title "基础连接" -Keys @("HOST", "PORT") }
+            1 {
+                Show-EnvGroupMenu -Config $Config -Title "GitHub 鉴权与保险库" -Keys @(
+                    "CLOUDVM_AUTH_MODE",
+                    "GITHUB_APP_ID",
+                    "GITHUB_APP_CLIENT_ID",
+                    "GITHUB_APP_CLIENT_SECRET",
+                    "GITHUB_APP_PRIVATE_KEY",
+                    "GITHUB_APP_SLUG",
+                    "SESSION_SECRET",
+                    "APP_ORIGIN"
+                )
             }
-            "2" {
-                $key = Read-Host "变量名"
-                if (-not $key) {
-                    Write-Warn "变量名不能为空。"
-                    Start-Sleep -Seconds 1
-                    break
-                }
-                Invoke-MenuAction -Command "Invoke-MenuEnvGet" -Arguments @($envPath, $key) -PauseMessage "按回车返回环境变量菜单"
-                break
+            2 {
+                Show-EnvGroupMenu -Config $Config -Title "访问控制与反向代理" -Keys @(
+                    "CLOUDVM_ALLOWED_GITHUB_USERS",
+                    "CLOUDVM_ALLOWED_GITHUB_IDS",
+                    "CLOUDVM_ALLOW_ANY_GITHUB_USER",
+                    "CLOUDVM_TRUST_PROXY",
+                    "CLOUDVM_SECURE_COOKIES",
+                    "CLOUDVM_ALLOW_INSECURE_REMOTE"
+                )
             }
-            "3" {
-                $key = Read-Host "变量名"
-                if (-not $key) {
-                    Write-Warn "变量名不能为空。"
-                    Start-Sleep -Seconds 1
-                    break
-                }
-                $value = Read-EnvMenuValue -Name $key
-                Invoke-MenuAction -Command "Invoke-MenuEnvSet" -Arguments @($Config, $key, $value) -PauseMessage "按回车返回环境变量菜单"
-                break
+            3 {
+                Show-EnvGroupMenu -Config $Config -Title "数据与 API" -Keys @(
+                    "LINODE_API_TOKEN",
+                    "CLOUDVM_DATA_DIR",
+                    "LINODE_API_BASE"
+                )
             }
-            "4" {
-                $key = Read-Host "变量名"
-                if (-not $key) {
-                    Write-Warn "变量名不能为空。"
-                    Start-Sleep -Seconds 1
-                    break
-                }
-                Invoke-MenuAction -Command "Invoke-MenuEnvUnset" -Arguments @($Config, $key) -PauseMessage "按回车返回环境变量菜单"
-                break
-            }
-            "0" {
-                return
-            }
-            "q" {
-                return
-            }
-            "Q" {
-                return
-            }
-            default {
-                Write-Host "无效选择。" -ForegroundColor Yellow
-                Start-Sleep -Seconds 1
+            4 {
+                Clear-MenuScreen
+                Show-EnvList -Path $envPath
+                Write-Host ""
+                Read-Host "按回车返回环境变量菜单" | Out-Null
             }
         }
     }
@@ -1161,74 +1477,53 @@ function Invoke-InteractiveMenu {
     if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) {
         throw "交互菜单需要终端。可执行 cloudvm help 查看命令。"
     }
+    Ensure-AppEnvFile -Config $Config | Out-Null
+    $items = @(
+        "启动服务",
+        "停止服务",
+        "重启服务",
+        "查看状态",
+        "查看日志",
+        "环境变量管理",
+        "更新软件（含脚本）",
+        "打开 Web 界面（桌面环境）",
+        "退出"
+    )
     while ($true) {
-        Clear-MenuScreen
-        Show-MenuHeader -Config $Config
-        Write-Host ""
-        Write-Host "  1) 启动服务"
-        Write-Host "  2) 停止服务"
-        Write-Host "  3) 重启服务"
-        Write-Host "  4) 查看状态"
-        Write-Host "  5) 查看日志"
-        Write-Host "  6) 环境变量管理"
-        Write-Host "  7) 更新软件"
-        Write-Host "  8) 更新 cloudvm 脚本"
-        Write-Host "  9) 打开 Web 界面（桌面环境）"
-        Write-Host "  0) 退出"
-        Write-Host ""
-        $choice = Read-Host "请选择操作"
+        $header = Get-MenuHeaderLines -Config $Config
+        $choice = Read-TuiMenu -HeaderLines $header -Items $items -Footer "↑/↓ 选择  Enter 确认  Q 退出"
+        if ($choice -lt 0) {
+            Clear-MenuScreen
+            return
+        }
         switch ($choice) {
-            "1" {
+            0 {
                 Invoke-MenuAction -Command "Invoke-MenuStart" -Arguments @($Config)
-                break
             }
-            "2" {
+            1 {
                 Invoke-MenuAction -Command "Invoke-MenuStop" -Arguments @($Config)
-                break
             }
-            "3" {
+            2 {
                 Invoke-MenuAction -Command "Invoke-MenuRestart" -Arguments @($Config)
-                break
             }
-            "4" {
+            3 {
                 Invoke-MenuAction -Command "Invoke-MenuStatus" -Arguments @($Config)
-                break
             }
-            "5" {
+            4 {
                 Invoke-MenuAction -Command "Invoke-MenuLogs" -Arguments @($Config)
-                break
             }
-            "6" {
+            5 {
                 Show-EnvMenu -Config $Config
-                break
             }
-            "7" {
+            6 {
                 Invoke-MenuAction -Command "Invoke-MenuUpdate" -Arguments @($Config)
-                break
             }
-            "8" {
-                Invoke-MenuAction -Command "Invoke-MenuUpdateScript" -Arguments @($Config)
-                break
-            }
-            "9" {
+            7 {
                 Invoke-MenuAction -Command "Invoke-MenuOpen" -Arguments @($Config)
-                break
             }
-            "0" {
+            8 {
                 Clear-MenuScreen
                 return
-            }
-            "q" {
-                Clear-MenuScreen
-                return
-            }
-            "Q" {
-                Clear-MenuScreen
-                return
-            }
-            default {
-                Write-Host "无效选择。" -ForegroundColor Yellow
-                Start-Sleep -Seconds 1
             }
         }
     }

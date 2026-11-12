@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALLER_VERSION="1.2.0"
+INSTALLER_VERSION="1.3.0"
 REPOSITORY="DoriyaNet/CloudVMController"
 BRANCH="main"
 INSTALL_DIR=""
@@ -195,11 +195,16 @@ copy_app_files() {
 
 ensure_env_file() {
     local target="$1"
-    if [[ ! -f "$target/.env" && -f "$target/.env.example" ]]; then
-        cp -f "$target/.env.example" "$target/.env"
-        chmod 0600 "$target/.env" 2>/dev/null || true
-        info "已创建 .env，可从 .env.example 中查看 GitHub App 配置项。"
+    if [[ -s "$target/.env" ]]; then
+        return 0
     fi
+    if [[ -f "$target/.env.example" ]]; then
+        cp -f "$target/.env.example" "$target/.env"
+    else
+        printf 'HOST=127.0.0.1\nPORT=4173\n' > "$target/.env"
+    fi
+    chmod 0600 "$target/.env" 2>/dev/null || true
+    info "已创建环境文件：$target/.env"
 }
 
 install_app_archive() {
@@ -498,6 +503,8 @@ else
 fi
 
 [[ -f "$TARGET_DIR/package.json" ]] || die "安装目录缺少 package.json：$TARGET_DIR"
+ensure_env_file "$TARGET_DIR"
+[[ -f "$TARGET_DIR/.env" ]] || die "无法创建环境文件：$TARGET_DIR/.env"
 
 resolve_node_runtime
 printf 'Node.js：%s\n' "$NODE_BIN"
@@ -506,7 +513,6 @@ install_dependencies
 install_launcher
 install_installer_copy
 write_config
-ensure_env_file "$TARGET_DIR"
 
 if [[ ${#ENV_ASSIGNMENTS[@]} -gt 0 ]]; then
     info "写入 .env 配置..."
@@ -534,7 +540,6 @@ printf '  cloudvm logs           查看日志\n'
 printf '  cloudvm env list       查看 .env 配置\n'
 printf '  cloudvm env set K=V    修改 .env 配置\n'
 printf '  cloudvm update         更新软件\n'
-printf '  cloudvm update-script  更新 cloudvm 脚本\n'
 
 if [[ "$NO_PATH" -eq 1 ]]; then
     warn "已跳过 PATH 修改。可直接运行：$BIN_DIR/cloudvm"
