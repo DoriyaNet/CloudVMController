@@ -123,6 +123,25 @@ function mergeCookieStrings(...values) {
   return [...pairs.values()].join("; ");
 }
 
+function htmlUnescape(value) {
+  return String(value)
+    .replaceAll("&amp;", "&")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">");
+}
+
+function redirectTarget(response, text) {
+  const location = response.headers.get("location");
+  if (location) {
+    return location;
+  }
+  const match = text.match(/id="continue" href="([^"]+)"/);
+  assert.ok(match, "expected a browser redirect target");
+  return htmlUnescape(match[1]);
+}
+
 function sessionCookieFor(user = USER, overrides = {}) {
   const session = createSession({
     user,
@@ -500,23 +519,25 @@ test("runs the GitHub login, installation, and vault unlock flow", async (t) => 
   t.after(() => stack.close());
 
   const login = await request(stack.baseUrl, "/api/auth/login");
-  assert.equal(login.response.status, 302);
+  assert.equal(login.response.status, 200);
+  assert.equal(login.response.headers.get("location"), null);
+  assert.match(login.text, /http-equiv="refresh"/);
+  const loginLocation = redirectTarget(login.response, login.text);
   assert.match(
-    login.response.headers.get("location"),
+    loginLocation,
     /^https:\/\/github\.com\/login\/oauth\/authorize/,
   );
   const oauthCookie = cookieHeader(login.response);
-  const state = new URL(
-    login.response.headers.get("location"),
-  ).searchParams.get("state");
+  const state = new URL(loginLocation).searchParams.get("state");
 
   const callback = await request(
     stack.baseUrl,
     `/api/auth/callback?code=test-code&state=${encodeURIComponent(state)}`,
     { cookie: oauthCookie },
   );
-  assert.equal(callback.response.status, 302);
-  assert.equal(callback.response.headers.get("location"), "/");
+  assert.equal(callback.response.status, 200);
+  assert.equal(callback.response.headers.get("location"), null);
+  assert.equal(redirectTarget(callback.response, callback.text), "/");
   const sessionCookie = cookieHeader(callback.response);
   assert.match(sessionCookie, /cloudvm_session=/);
 
@@ -532,8 +553,9 @@ test("runs the GitHub login, installation, and vault unlock flow", async (t) => 
   const install = await request(stack.baseUrl, "/api/github/install", {
     cookie: sessionCookie,
   });
-  assert.equal(install.response.status, 302);
-  const installLocation = install.response.headers.get("location");
+  assert.equal(install.response.status, 200);
+  assert.equal(install.response.headers.get("location"), null);
+  const installLocation = redirectTarget(install.response, install.text);
   assert.match(
     installLocation,
     /^https:\/\/github\.com\/apps\/cloudvm\/installations\/new\?state=/,
@@ -549,8 +571,12 @@ test("runs the GitHub login, installation, and vault unlock flow", async (t) => 
       ),
     },
   );
-  assert.equal(setup.response.status, 302);
-  assert.equal(setup.response.headers.get("location"), "/?github=installed");
+  assert.equal(setup.response.status, 200);
+  assert.equal(setup.response.headers.get("location"), null);
+  assert.equal(
+    redirectTarget(setup.response, setup.text),
+    "/?github=installed",
+  );
 
   const installations = await request(
     stack.baseUrl,
@@ -654,7 +680,7 @@ test("redirects a non-allowlisted GitHub user instead of creating a session", as
 
   const login = await request(stack.baseUrl, "/api/auth/login");
   const state = new URL(
-    login.response.headers.get("location"),
+    redirectTarget(login.response, login.text),
   ).searchParams.get("state");
   const callback = await request(
     stack.baseUrl,
@@ -662,9 +688,10 @@ test("redirects a non-allowlisted GitHub user instead of creating a session", as
     { cookie: cookieHeader(login.response) },
   );
 
-  assert.equal(callback.response.status, 302);
+  assert.equal(callback.response.status, 200);
+  assert.equal(callback.response.headers.get("location"), null);
   assert.equal(
-    callback.response.headers.get("location"),
+    redirectTarget(callback.response, callback.text),
     "/?auth_error=github_user_not_allowed",
   );
   assert.doesNotMatch(cookieHeader(callback.response), /cloudvm_session=[^;]+/);

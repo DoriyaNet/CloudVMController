@@ -127,15 +127,19 @@ cloudvm restart
 
 ### 创建 GitHub App
 
+完整的逐项说明（每个字段填什么、权限怎么选、常见错误）见 wiki：[创建 GitHub App](https://github.com/DoriyaNet/CloudVMController/wiki/GitHub-App)。
+
 1. 打开 GitHub **Settings → Developer settings → GitHub Apps → New GitHub App**。
 2. **Callback URL** 填写 `https://YOUR_DOMAIN/api/auth/callback`。
-3. **Setup URL** 填写 `https://YOUR_DOMAIN/api/github/setup`，并启用 Redirect on update。
+3. **Setup URL** 填写 `https://YOUR_DOMAIN/api/github/setup`；**Redirect on update 保持不勾选**（当前安装回调依赖 state）。
 4. **Repository permissions** 只授予 Contents: Read and write、Metadata: Read-only。
-5. 创建后记录 App ID、Client ID，生成 Client secret，并下载 Private key。
+5. 取消勾选 **Webhook → Active**，不订阅任何事件。
+6. 单人自建选择 **Only on this account**；把 App 安装到私有保险库仓库。
+7. 创建后记录 App ID、Client ID，生成 Client secret，并下载 Private key；从 Public page URL 取得 slug。
 
 ### 配置 `.env`
 
-在安装目录创建或编辑 `.env`：
+可以直接运行 `cloudvm`，进入「环境变量管理 → GitHub 鉴权与保险库」逐项填写；也可以编辑安装目录的 `.env`：
 
 ```bash
 cp .env.example .env
@@ -152,7 +156,8 @@ CLOUDVM_AUTH_MODE=github
 GITHUB_APP_ID=123456
 GITHUB_APP_CLIENT_ID=Iv1.xxxxxxxx
 GITHUB_APP_CLIENT_SECRET=xxxxxxxx
-# 可直接把 PEM 用双引号包起来跨多行，或把换行替换成字面量 \n
+# 推荐：cloudvm env set GITHUB_APP_PRIVATE_KEY=@/path/to/private-key.pem
+# 也可直接把 PEM 用双引号包起来跨多行，或把换行替换成字面量 \n
 GITHUB_APP_PRIVATE_KEY=
 GITHUB_APP_SLUG=your-app-slug
 # 填入 openssl rand -base64 48 的输出
@@ -216,6 +221,7 @@ npm start
 | [快速开始](https://github.com/DoriyaNet/CloudVMController/wiki/Quick-Start) | 安装、首次连接与基础配置 |
 | [Windows 一键安装](https://github.com/DoriyaNet/CloudVMController/wiki/Windows-Install) | 安装脚本、cloudvm 命令与更新 |
 | [Linux 一键安装](https://github.com/DoriyaNet/CloudVMController/wiki/Linux-Install) | 安装脚本、cloudvm 命令与更新 |
+| [创建 GitHub App](https://github.com/DoriyaNet/CloudVMController/wiki/GitHub-App) | GitHub App 表单逐项填写、权限、回调与保险库配置 |
 | [Linode](https://github.com/DoriyaNet/CloudVMController/wiki/Linode) | 令牌权限、多令牌管理、实例创建、IP 交换与换新 |
 | [Oracle Cloud](https://github.com/DoriyaNet/CloudVMController/wiki/Oracle-Cloud) | API 密钥、IAM 策略、实例创建、监控、备份、串口与终止 |
 | [使用指南](https://github.com/DoriyaNet/CloudVMController/wiki/Usage) | 开关机、SOCKS 代理与多账户路由 |

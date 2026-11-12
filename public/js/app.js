@@ -1607,8 +1607,15 @@ function closeModal() {
 }
 
 function renderModal() {
+  const previousModalType = elements.modalRoot.dataset.modalType || "";
+  const previousCard = elements.modalRoot.querySelector(".modal-card");
+  const isUpdatingModal =
+    Boolean(previousCard) && previousModalType === state.modal?.type;
+  const previousScrollTop = previousCard?.scrollTop || 0;
+
   if (!state.modal) {
     elements.modalRoot.innerHTML = "";
+    delete elements.modalRoot.dataset.modalType;
     syncBodyLock();
     return;
   }
@@ -1876,10 +1883,27 @@ function renderModal() {
     elements.modalRoot.innerHTML = renderOracleTerminateModal(state);
   }
 
+  const renderedModalType = state.modal.type;
+  elements.modalRoot.dataset.modalType = renderedModalType;
+  const modalLayer = elements.modalRoot.querySelector(".modal-layer");
+  if (isUpdatingModal) {
+    modalLayer?.classList.add("is-refreshing");
+    elements.modalRoot.querySelector(".modal-card")?.classList.add("is-open");
+  }
+
   enhanceSelects(elements.modalRoot);
   syncBodyLock();
   requestAnimationFrame(() => {
+    if (elements.modalRoot.dataset.modalType !== renderedModalType) {
+      return;
+    }
     elements.modalRoot.querySelector(".modal-card")?.classList.add("is-open");
+    if (isUpdatingModal) {
+      const card = elements.modalRoot.querySelector(".modal-card");
+      if (card) {
+        card.scrollTop = previousScrollTop;
+      }
+    }
   });
 }
 
@@ -3271,7 +3295,37 @@ function closeDrawer() {
 }
 
 function renderDrawer() {
+  const detailKey = state.detail.open
+    ? `${state.detail.provider || "linode"}:${state.detail.tokenId || ""}:${state.detail.id || ""}`
+    : "";
+  const previousDetailKey = elements.drawerRoot.dataset.detailKey || "";
+  const previousBody = elements.drawerRoot.querySelector(".drawer-body");
+  const isUpdatingDrawer =
+    Boolean(detailKey) &&
+    Boolean(previousBody) &&
+    previousDetailKey === detailKey;
+  const previousScrollTop = previousBody?.scrollTop || 0;
+
   elements.drawerRoot.innerHTML = renderDrawerView(state);
+  if (detailKey) {
+    elements.drawerRoot.dataset.detailKey = detailKey;
+  } else {
+    delete elements.drawerRoot.dataset.detailKey;
+  }
+  if (isUpdatingDrawer) {
+    elements.drawerRoot
+      .querySelector(".drawer-layer")
+      ?.classList.add("is-refreshing");
+    requestAnimationFrame(() => {
+      if (elements.drawerRoot.dataset.detailKey !== detailKey) {
+        return;
+      }
+      const body = elements.drawerRoot.querySelector(".drawer-body");
+      if (body) {
+        body.scrollTop = previousScrollTop;
+      }
+    });
+  }
   if (state.detail.open) {
     document.body.classList.add("drawer-open");
   } else {

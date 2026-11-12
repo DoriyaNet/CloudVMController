@@ -6527,6 +6527,44 @@ code {
   }
 }
 
+/* Keep live updates from replaying overlay entrance motion. */
+
+.modal-layer.is-refreshing .modal-backdrop,
+.drawer-layer.is-refreshing .drawer-backdrop {
+  animation: none;
+}
+
+.modal-layer.is-refreshing .modal-card,
+.drawer-layer.is-refreshing .drawer {
+  animation: none;
+  transition: none;
+}
+
+/* Compact activity rows need their own inset when used as a panel body. */
+
+.activity-panel .event-list {
+  padding: 4px 20px 12px;
+}
+
+.activity-panel .event-item.is-compact {
+  padding: 10px 0;
+}
+
+.activity-panel .event-item.is-compact:first-child {
+  padding-top: 2px;
+}
+
+.activity-panel .event-item.is-compact:last-child {
+  padding-bottom: 2px;
+}
+
+@media (max-width: 640px) {
+  .activity-panel .event-list {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+}
+
 /* GitHub auth and vault gate */
 
 body.auth-gate .app-shell {

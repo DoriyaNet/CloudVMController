@@ -202,12 +202,67 @@ function sendJson(response, status, payload) {
   response.end(body);
 }
 
-function sendRedirect(response, location, status = 302) {
-  response.statusCode = status;
-  response.setHeader("Location", location);
-  response.setHeader("Cache-Control", "no-store, max-age=0");
-  response.setHeader("Content-Type", "text/plain; charset=utf-8");
-  response.end();
+function escapeHtmlAttribute(value) {
+  return String(value).replace(/[&<>"']/g, (character) => {
+    switch (character) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      default:
+        return "&#39;";
+    }
+  });
+}
+
+function sendBrowserRedirect(response, location) {
+  const target = String(location);
+  const escapedTarget = escapeHtmlAttribute(target);
+  const body = `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="refresh" content="0; url=${escapedTarget}" />
+    <title>正在跳转…</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #0a0a0a;
+        color: #e5e5e5;
+        font: 14px/1.6 system-ui, sans-serif;
+      }
+      main { max-width: 32rem; padding: 2rem; text-align: center; }
+      a { color: #8ab4f8; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p>正在跳转…</p>
+      <p><a id="continue" href="${escapedTarget}">如果没有自动跳转，请点击这里</a></p>
+    </main>
+  </body>
+</html>`;
+  response.statusCode = 200;
+  response.setHeader(
+    "Cache-Control",
+    "no-store, no-cache, must-revalidate, max-age=0",
+  );
+  response.setHeader("CDN-Cache-Control", "no-store");
+  response.setHeader("Surrogate-Control", "no-store");
+  response.setHeader("Vary", "Cookie");
+  response.setHeader("Pragma", "no-cache");
+  response.setHeader("Expires", "0");
+  response.setHeader("Content-Type", "text/html; charset=utf-8");
+  response.setHeader("Content-Length", Buffer.byteLength(body));
+  response.end(body);
 }
 
 function hasImportableSettings(state) {
@@ -776,7 +831,7 @@ export function createAuthController({
         },
       ),
     );
-    sendRedirect(
+    sendBrowserRedirect(
       response,
       buildAuthorizeUrl({
         clientId: config.clientId,
@@ -889,7 +944,7 @@ export function createAuthController({
     const user = await fetchGitHubUser(token.accessToken, { fetchImpl });
     if (!isUserAllowed(config, user)) {
       clearAuthCookies(response);
-      sendRedirect(response, GITHUB_USER_DENIED_REDIRECT);
+      sendBrowserRedirect(response, GITHUB_USER_DENIED_REDIRECT);
       return;
     }
 
@@ -897,7 +952,7 @@ export function createAuthController({
     setSessionCookie(response, session, now());
     clearVaultCookie(response);
     destroyVaultSessionsForUser(user.id);
-    sendRedirect(response, attempt.returnTo);
+    sendBrowserRedirect(response, attempt.returnTo);
   }
 
   async function handleSession(request, response) {
@@ -940,7 +995,7 @@ export function createAuthController({
         },
       ),
     );
-    sendRedirect(
+    sendBrowserRedirect(
       response,
       buildInstallUrl(config.slug, attempt.cookie.state),
     );
@@ -969,7 +1024,7 @@ export function createAuthController({
           "Invalid setup return path.",
         );
       }
-      sendRedirect(
+      sendBrowserRedirect(
         response,
         `/api/auth/login?returnTo=${encodeURIComponent(returnTo)}`,
       );
@@ -1020,7 +1075,7 @@ export function createAuthController({
       installationId,
       { fetchImpl },
     );
-    sendRedirect(response, GITHUB_INSTALL_REDIRECT);
+    sendBrowserRedirect(response, GITHUB_INSTALL_REDIRECT);
   }
 
   async function handleInstallations(request, response) {

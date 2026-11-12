@@ -5,6 +5,9 @@
 负责访问用户选择的私有仓库，保险库密文保存在
 `.cloudvm/vault.json`。
 
+创建 GitHub App 的逐项操作说明见 wiki：
+[创建 GitHub App](https://github.com/DoriyaNet/CloudVMController/wiki/GitHub-App)。
+
 ## 目标
 
 - 服务端不把 Linode Token、OCI 私钥或代理密码写入本地磁盘。
@@ -138,6 +141,13 @@ buildInstallUrl(slug, state)
 ```
 
 OAuth 使用 state + PKCE S256，state 有效期 10 分钟。
+
+登录、安装和回调入口不会直接返回 HTTP 302。服务端改为返回一个带
+`meta refresh` 的站内跳转页，再由浏览器跳转到 GitHub 或返回控制台。这是为了兼容
+会在服务端自动跟随 302 的 CDN/反向代理：这类代理会把 GitHub 登录页渲染在控制台
+域名下，导致 GitHub 登录表单的 `POST /session` 被提交到控制台并返回
+`METHOD_NOT_ALLOWED`。如果 CDN 仍出现该现象，应同时关闭 CDN 的“回源跟随跳转”
+或“回源跟随 301/302”选项。
 
 ### `server/auth/session.js`
 
